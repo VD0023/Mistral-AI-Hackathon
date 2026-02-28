@@ -36,30 +36,6 @@ extends Node3D
 @export var suspicion_close_distance := 2.6
 @export var suspicion_key_distance := 1.8
 @export var suspicion_movement_threshold := 0.08
-@export var guard_wake_suspicion_threshold := 78.0
-@export var guard_chase_suspicion_threshold := 82.0
-@export var guard_sleep_animation := "mixamo_com"
-@export var guard_wake_animation := "Standing Up/mixamo_com"
-@export var guard_run_animation := "Mutant Run/mixamo_com"
-@export var guard_run_speed := 3.7
-@export var guard_chase_speed := 5.9
-@export var guard_target_reach_distance := 0.35
-@export var guard_catch_distance := 1.3
-@export var guard_model_facing_offset_degrees := 180.0
-@export var guard_repath_interval := 0.16
-@export var guard_repath_distance := 0.55
-@export var guard_chase_lock_seconds := 1.8
-@export var guard_stuck_timeout_seconds := 0.65
-@export var guard_stuck_distance_threshold := 0.04
-@export var guard_lane_flip_threshold := 0.38
-@export var guard_counter_avoid_margin_x := 0.22
-@export var guard_counter_avoid_margin_z := 0.48
-@export var guard_world_margin := 0.14
-@export var guard_left_corridor_inset := 0.06
-@export var guard_path_probe_height := 1.05
-@export var guard_path_probe_margin := 0.16
-@export var guard_commit_repath_interval := 0.42
-@export var guard_commit_repath_distance := 1.1
 @export var distraction_guard_grace_seconds := 2.8
 @export var key_merchant_safe_distance := 1.45
 @export var decide_tick_seconds := 0.55
@@ -70,8 +46,9 @@ extends Node3D
 @export var focus_vignette_strength := 0.26
 @export var focus_merchant_label_height := 2.45
 @export var focus_guard_label_height := 2.25
-@export var ambient_mutter_interval_seconds := 10.0
-@export var ambient_mutter_first_delay_seconds := 2.2
+@export var ambient_mutter_interval_seconds := 7.0
+@export var ambient_mutter_first_delay_seconds := 1.4
+@export var ambient_mutter_text_fallback := true
 @export var whisper_near_distance := 1.5
 @export var whisper_far_distance := 9.5
 @export var whisper_near_volume_db := -2.8
@@ -115,21 +92,12 @@ var interact_ray: RayCast3D
 var suspicion_panel: PanelContainer
 var suspicion_text: Label
 var suspicion_bar: ProgressBar
-var guard_anim_player: AnimationPlayer
 var guard_awake := false
 var guard_target_active := false
 var guard_target_position := Vector3.ZERO
 var guard_last_seen_player_position := Vector3.ZERO
 var guard_has_last_seen_player := false
 var guard_chasing_player := false
-var guard_path_points: Array[Vector3] = []
-var guard_repath_accum := 0.0
-var guard_last_path_target := Vector3.ZERO
-var guard_chase_lock_until := 0.0
-var guard_forced_bypass_side := 0
-var guard_forced_lane_side := 0
-var guard_last_position := Vector3.ZERO
-var guard_stuck_elapsed := 0.0
 var distraction_guard_grace_until := 0.0
 var guard_capture_committed := false
 var recent_actions: Array[String] = []
@@ -165,7 +133,6 @@ var throwable_templates: Dictionary = {}
 
 var yaw := 0.0
 var pitch := 0.0
-
 enum InteractTarget { NONE, MERCHANT, KEY, EXIT }
 var current_target := InteractTarget.NONE
 
@@ -510,6 +477,17 @@ func _create_world_colliders():
 	counter_shape.position = Vector3(-3.5, 0.7, -4.0)
 	counter.add_child(counter_shape)
 
+	# Fence/gate blocker: prevents guard from clipping into the ornament gate pocket.
+	var gate_blocker := StaticBody3D.new()
+	gate_blocker.name = "GateBlocker"
+	root.add_child(gate_blocker)
+	var gate_shape := CollisionShape3D.new()
+	var gate_box := BoxShape3D.new()
+	gate_box.size = Vector3(1.05, 2.2, 0.9)
+	gate_shape.shape = gate_box
+	gate_shape.position = Vector3(-5.0, 1.1, -4.0)
+	gate_blocker.add_child(gate_shape)
+
 func _add_wall_collider(parent: Node, world_pos: Vector3, size: Vector3):
 	var wall := StaticBody3D.new()
 	parent.add_child(wall)
@@ -572,8 +550,7 @@ func _update_barnaby_perception(delta: float):
 	var suspicious_context := near_key or dist <= suspicion_close_distance or move_amount >= suspicion_movement_threshold
 
 	if visible:
-		guard_last_seen_player_position = player_body.global_position
-		guard_has_last_seen_player = true
+		_set_guard_last_seen(player_body.global_position)
 		seen_tick_accum += delta
 		unseen_tick_accum = 0.0
 		if seen_tick_accum >= barnaby_perception_tick:
@@ -850,7 +827,7 @@ func _setup_barnaby_mutter_audio():
 
 func _update_ambient_mutter(delta: float):
 	_update_mutter_volume()
-	if merchant == null or mutter_audio_player == null:
+	if merchant == null:
 		return
 	if game_locked or awaiting_hood_choice or is_interacting:
 		return
@@ -899,7 +876,7 @@ func _is_mutter_eligible() -> bool:
 		return true
 	if ai_last_skill in ["investigate_last_seen", "search_counter", "patrol_counter", "question_player"]:
 		return true
-	return suspicion_value >= 55.0 and not key_stolen
+	return suspicion_value >= 48.0 and not key_stolen
 
 func _update_mutter_volume():
 	if mutter_audio_player == null or merchant == null or camera == null:
@@ -921,6 +898,7 @@ func _on_mutter_reply(_res, code, _headers, body):
 	var text := str(payload.get("text", "")).strip_edges()
 	if text == "":
 		return
+	_emit_mutter_feedback(text)
 	var audio_b64 := str(payload.get("audio_base64", ""))
 	if audio_b64 == "" or mutter_audio_player == null:
 		return
@@ -932,6 +910,16 @@ func _on_mutter_reply(_res, code, _headers, body):
 	mutter_audio_player.stream = stream
 	_update_mutter_volume()
 	mutter_audio_player.play()
+
+func _emit_mutter_feedback(text: String):
+	if text.strip_edges() == "":
+		return
+	if ambient_mutter_text_fallback and npc_text and not is_interacting and not game_locked:
+		npc_text.text = "Barnaby mutters: %s" % text
+	if merchant and merchant.has_method("play_dialogue_line") and not is_interacting and not game_locked:
+		var mood := "annoyed" if suspicion_value >= 52.0 else "neutral"
+		var duration := clampf(_estimate_dialogue_duration_seconds(text) * 0.72, 0.85, 2.4)
+		merchant.call("play_dialogue_line", mood, duration)
 
 func _estimate_dialogue_duration_seconds(line: String) -> float:
 	var words: int = maxi(1, line.strip_edges().split(" ", false).size())
@@ -988,12 +976,11 @@ func _on_world_event_reply(_res, _code, _headers, body):
 	if merchant and not merchant_dialogue_busy and not stealing_key and not is_interacting and emotion != last_world_emotion:
 		last_world_emotion = emotion
 		merchant.start_behavior(emotion)
-	var should_force_guard := event_type == "start_visit" and has_stolen
-	if action_hint == "alert" or suspicion_value >= guard_chase_suspicion_threshold or should_force_guard:
-		guard_capture_committed = true
+	if action_hint == "alert":
+		_set_guard_capture_committed(true)
 		_start_guard_player_chase_if_allowed(true)
-	elif action_hint == "investigate" and guard_awake and not guard_chasing_player:
-		_command_guard_to_last_seen()
+	elif action_hint == "investigate":
+		_command_guard_to_last_seen(true)
 
 func _on_decide_reply(_res, code, _headers, body):
 	decide_in_flight = false
@@ -1029,8 +1016,7 @@ func _on_decide_reply(_res, code, _headers, body):
 		var pos = blackboard.get("last_seen_pos", null)
 		if pos is Dictionary:
 			bb_last_seen = _vector_from_payload(pos, bb_last_seen)
-			guard_last_seen_player_position = bb_last_seen
-			guard_has_last_seen_player = true
+			_set_guard_last_seen(bb_last_seen)
 
 	var guard_state_payload = payload.get("guard_state", {})
 	var guard_mode := ""
@@ -1041,61 +1027,60 @@ func _on_decide_reply(_res, code, _headers, body):
 
 	# Keep pursuit stable for a short lock window to avoid state thrash/flicker.
 	if guard_chasing_player and _guard_chase_locked():
-		if player_body != null:
-			guard_target_position = Vector3(player_body.global_position.x, guard.global_position.y, player_body.global_position.z)
+		if player_body != null and guard != null:
+			_set_guard_target_position(Vector3(player_body.global_position.x, guard.global_position.y, player_body.global_position.z))
 		_play_guard_running()
 		_set_decision_trace(payload)
 		return
 
-	var key_missing_bb := false
-	if blackboard is Dictionary:
-		key_missing_bb = bool(blackboard.get("key_missing", false))
-	var force_guard := key_missing_bb or key_stolen or (intent == "accuse" and confidence >= 0.75)
-	if force_guard:
-		guard_capture_committed = true
+	var barnaby_called := (
+		guard_mode in ["chase_player", "wake_guard", "block_exit", "investigate_last_seen", "question_player"]
+		or action in ["chase_player", "wake_guard", "block_exit", "investigate_last_seen", "question_player"]
+	)
+	if guard_mode == "chase_player" or action == "chase_player":
+		_set_guard_capture_committed(true)
 
 	if guard_capture_committed and not game_locked:
 		if guard_chasing_player:
-			if player_body != null:
-				guard_target_position = Vector3(player_body.global_position.x, guard.global_position.y, player_body.global_position.z)
-			guard_target_active = true
+			if player_body != null and guard != null:
+				_set_guard_target_position(Vector3(player_body.global_position.x, guard.global_position.y, player_body.global_position.z))
 			_play_guard_running()
 		else:
 			_start_guard_player_chase_if_allowed(true)
 		_set_decision_trace(payload)
 		return
 
-	var handled_by_guard_state := _apply_guard_state(guard_mode, guard_target_payload, bb_last_seen, should_chase_player, force_guard)
+	var handled_by_guard_state := _apply_guard_state(guard_mode, guard_target_payload, bb_last_seen, should_chase_player, barnaby_called)
 	if not handled_by_guard_state:
 		match action:
 			"chase_player":
-				guard_capture_committed = true
-				_start_guard_player_chase_if_allowed(force_guard)
+				_set_guard_capture_committed(true)
+				_start_guard_player_chase_if_allowed(barnaby_called)
 			"wake_guard":
 				if should_chase_player:
-					guard_capture_committed = true
-					_start_guard_player_chase_if_allowed(force_guard)
-				elif _wake_guard_if_allowed(force_guard):
-					_command_guard_to_last_seen()
+					_set_guard_capture_committed(true)
+					_start_guard_player_chase_if_allowed(barnaby_called)
+				elif _wake_guard_if_allowed(barnaby_called):
+					_command_guard_to_last_seen(barnaby_called)
 			"investigate_last_seen":
 				if should_chase_player:
-					guard_capture_committed = true
-					_start_guard_player_chase_if_allowed(force_guard)
-				elif _wake_guard_if_allowed(force_guard):
-					_command_guard_to_position(bb_last_seen)
+					_set_guard_capture_committed(true)
+					_start_guard_player_chase_if_allowed(barnaby_called)
+				elif _wake_guard_if_allowed(barnaby_called):
+					_command_guard_to_position(bb_last_seen, barnaby_called)
 			"patrol_counter":
 				if merchant and merchant.has_method("start_counter_patrol") and not is_interacting:
 					merchant.call("start_counter_patrol", 4.0)
 			"block_exit":
 				if should_chase_player:
-					guard_capture_committed = true
-					_start_guard_player_chase_if_allowed(force_guard)
-				elif _wake_guard_if_allowed(force_guard):
-					_command_guard_to_position(exit_door.global_position)
+					_set_guard_capture_committed(true)
+					_start_guard_player_chase_if_allowed(barnaby_called)
+				elif _wake_guard_if_allowed(barnaby_called):
+					_command_guard_to_position(exit_door.global_position, barnaby_called)
 			"question_player":
 				if should_chase_player:
-					guard_capture_committed = true
-					_start_guard_player_chase_if_allowed(force_guard)
+					_set_guard_capture_committed(true)
+					_start_guard_player_chase_if_allowed(barnaby_called)
 				if not radial_menu.visible and not is_interacting and not game_locked:
 					npc_text.text = "Barnaby: You there. Why skulk about my shop?"
 			_:
@@ -1103,29 +1088,29 @@ func _on_decide_reply(_res, code, _headers, body):
 
 	_set_decision_trace(payload)
 
-func _apply_guard_state(mode: String, target_payload, fallback_last_seen: Vector3, should_chase_player: bool, force_guard: bool) -> bool:
+func _apply_guard_state(mode: String, target_payload, fallback_last_seen: Vector3, should_chase_player: bool, barnaby_called: bool) -> bool:
 	if mode == "":
 		return false
 	match mode:
 		"idle":
 			return true
 		"chase_player":
-			guard_capture_committed = true
-			_start_guard_player_chase_if_allowed(force_guard)
+			_set_guard_capture_committed(true)
+			_start_guard_player_chase_if_allowed(barnaby_called)
 			return true
 		"block_exit":
 			if should_chase_player:
-				guard_capture_committed = true
-				_start_guard_player_chase_if_allowed(force_guard)
-			elif _wake_guard_if_allowed(force_guard):
-				_command_guard_to_position(exit_door.global_position)
+				_set_guard_capture_committed(true)
+				_start_guard_player_chase_if_allowed(barnaby_called)
+			elif _wake_guard_if_allowed(barnaby_called):
+				_command_guard_to_position(exit_door.global_position, barnaby_called)
 			return true
 		"investigate_last_seen":
 			var target := fallback_last_seen
 			if target_payload is Dictionary:
 				target = _vector_from_payload(target_payload, target)
-			if _wake_guard_if_allowed(force_guard):
-				_command_guard_to_position(target)
+			if _wake_guard_if_allowed(barnaby_called):
+				_command_guard_to_position(target, barnaby_called)
 			return true
 		"search_counter":
 			if merchant and merchant.has_method("start_counter_patrol") and not is_interacting:
@@ -1133,8 +1118,8 @@ func _apply_guard_state(mode: String, target_payload, fallback_last_seen: Vector
 			return true
 		"question_player":
 			if should_chase_player:
-				guard_capture_committed = true
-				_start_guard_player_chase_if_allowed(force_guard)
+				_set_guard_capture_committed(true)
+				_start_guard_player_chase_if_allowed(barnaby_called)
 			elif not radial_menu.visible and not is_interacting and not game_locked:
 				npc_text.text = "Barnaby: Why are you lurking here?"
 			return true
@@ -1749,6 +1734,8 @@ func _spawn_key_prop():
 	key_shape.shape = key_sphere
 	key_shape.position = Vector3.ZERO
 	key_area.add_child(key_shape)
+	if guard != null and guard.has_method("set_key_area"):
+		guard.call("set_key_area", key_area)
 
 func _sync_key_interact_area():
 	if key_node == null or key_area == null:
@@ -1807,6 +1794,8 @@ func _steal_key_sequence():
 	if key_area:
 		key_area.queue_free()
 		key_area = null
+	if guard != null and guard.has_method("set_key_area"):
+		guard.call("set_key_area", key_area)
 	key_stolen = true
 	stealing_key = false
 	distraction_guard_grace_until = 0.0
@@ -1837,7 +1826,7 @@ func _handle_start_visit_state(has_stolen: bool, thief_recognized: bool, emotion
 	suspicion_value = maxf(suspicion_value, 95.0)
 	if merchant:
 		merchant.start_behavior("hostile")
-	guard_capture_committed = true
+	_set_guard_capture_committed(true)
 	_start_guard_player_chase_if_allowed(true)
 	if thief_recognized or action_hint == "alert" or not player_hood_on:
 		npc_text.text = "Barnaby shouts: \"Thief! Guard, take them now!\""
@@ -1970,11 +1959,8 @@ func _on_reply(_res, code, _head, body):
 		else:
 			merchant.start_behavior(emotion)
 	if is_caught:
-		guard_capture_committed = true
+		_set_guard_capture_committed(true)
 		_start_guard_player_chase_if_allowed(true)
-	elif suspicion_value >= guard_chase_suspicion_threshold or (emotion == "hostile" and suspicion_value >= guard_wake_suspicion_threshold):
-		guard_capture_committed = true
-		_start_guard_player_chase_if_allowed(false)
 
 	if is_caught:
 		_fail_run("Barnaby identified the theft during dialogue.")
@@ -2017,406 +2003,106 @@ func _setup_guard_state():
 	guard_capture_committed = false
 	if guard == null:
 		return
-	guard_anim_player = guard.get_node_or_null("AnimationPlayer") as AnimationPlayer
-	if guard_anim_player == null:
+	if guard.has_method("setup_state"):
+		guard.call("setup_state")
+	if guard.has_method("set_player_body"):
+		guard.call("set_player_body", player_body)
+	if guard.has_method("set_key_area"):
+		guard.call("set_key_area", key_area)
+	var capture_cb := Callable(self, "_trigger_guard_capture")
+	if guard.has_signal("captured_player") and not guard.is_connected("captured_player", capture_cb):
+		guard.connect("captured_player", capture_cb)
+	_sync_guard_state_cache()
+
+func _guard_runtime_sync():
+	if guard == null:
 		return
-	var finished_cb := Callable(self, "_on_guard_animation_finished")
-	if not guard_anim_player.animation_finished.is_connected(finished_cb):
-		guard_anim_player.animation_finished.connect(finished_cb)
-	_play_guard_sleeping()
-	guard_target_active = false
-	guard_has_last_seen_player = false
-	guard_chasing_player = false
-	guard_path_points.clear()
-	guard_repath_accum = 0.0
-	guard_last_path_target = guard.global_position
-	guard_chase_lock_until = 0.0
-	guard_forced_bypass_side = 0
-	guard_forced_lane_side = 0
-	guard_last_position = guard.global_position
-	guard_stuck_elapsed = 0.0
+	if guard.has_method("update_runtime_state"):
+		guard.call("update_runtime_state", suspicion_value, key_stolen, game_locked, distraction_guard_grace_until)
 
-func _wake_guard():
-	if guard_awake:
+func _sync_guard_state_cache():
+	if guard == null:
 		return
-	guard_awake = true
-	var anim_name := _resolve_guard_animation(guard_wake_animation, ["Standing Up/mixamo_com", "Standing Up"])
-	if guard_anim_player != null and anim_name != "":
-		guard_anim_player.play(anim_name)
+	if guard.has_method("is_awake"):
+		guard_awake = bool(guard.call("is_awake"))
+	if guard.has_method("is_chasing"):
+		guard_chasing_player = bool(guard.call("is_chasing"))
+	if guard.has_method("is_target_active"):
+		guard_target_active = bool(guard.call("is_target_active"))
+	if guard.has_method("get_target_position"):
+		guard_target_position = guard.call("get_target_position")
+	if guard.has_method("is_capture_committed"):
+		guard_capture_committed = bool(guard.call("is_capture_committed"))
+	if guard.has_method("has_last_seen_player"):
+		guard_has_last_seen_player = bool(guard.call("has_last_seen_player"))
+	if guard.has_method("get_last_seen_player_position"):
+		guard_last_seen_player_position = guard.call("get_last_seen_player_position")
 
-func _guard_grace_active() -> bool:
-	if key_stolen:
-		return false
-	var now := Time.get_ticks_msec() / 1000.0
-	return now < distraction_guard_grace_until
+func _set_guard_last_seen(world_pos: Vector3):
+	guard_last_seen_player_position = world_pos
+	guard_has_last_seen_player = true
+	if guard != null and guard.has_method("set_last_seen_player_position"):
+		guard.call("set_last_seen_player_position", world_pos)
 
-func _can_wake_guard(force_guard: bool = false) -> bool:
-	if force_guard:
-		return true
-	if guard_awake:
-		return true
-	if key_stolen:
-		return true
-	if _guard_grace_active():
-		return false
-	return suspicion_value >= guard_wake_suspicion_threshold
+func _set_guard_target_position(world_pos: Vector3):
+	guard_target_position = world_pos
+	guard_target_active = true
+	if guard != null and guard.has_method("set_target_position"):
+		guard.call("set_target_position", world_pos)
 
-func _can_chase_guard(force_guard: bool = false) -> bool:
-	if force_guard:
-		return true
-	if guard_chasing_player:
-		return true
-	if key_stolen:
-		return true
-	if _guard_grace_active():
-		return false
-	return suspicion_value >= guard_chase_suspicion_threshold
+func _set_guard_capture_committed(committed: bool):
+	guard_capture_committed = committed
+	if guard != null and guard.has_method("set_capture_committed"):
+		guard.call("set_capture_committed", committed)
 
 func _guard_chase_locked() -> bool:
-	var now := Time.get_ticks_msec() / 1000.0
-	return now < guard_chase_lock_until
+	if guard == null or not guard.has_method("chase_locked"):
+		return false
+	return bool(guard.call("chase_locked"))
 
 func _wake_guard_if_allowed(force_guard: bool = false) -> bool:
-	if not _can_wake_guard(force_guard):
+	_guard_runtime_sync()
+	if guard == null or not guard.has_method("wake_if_allowed"):
 		return false
-	_wake_guard()
-	return guard_awake
+	var woke := bool(guard.call("wake_if_allowed", force_guard))
+	_sync_guard_state_cache()
+	return woke
 
 func _start_guard_player_chase_if_allowed(force_guard: bool = false) -> bool:
-	if not _can_chase_guard(force_guard):
+	_guard_runtime_sync()
+	if guard == null or not guard.has_method("start_chase_if_allowed"):
 		return false
-	if not _wake_guard_if_allowed(force_guard):
-		return false
-	guard_capture_committed = true
-	_start_guard_player_chase()
-	return true
-
-func _start_guard_player_chase():
-	if player_body == null or guard == null:
-		return
-	var now := Time.get_ticks_msec() / 1000.0
-	guard_chase_lock_until = maxf(guard_chase_lock_until, now + guard_chase_lock_seconds)
-	var next_target := Vector3(player_body.global_position.x, guard.global_position.y, player_body.global_position.z)
-	var switching_mode := not guard_chasing_player
-	guard_chasing_player = true
-	guard_target_active = true
-	guard_target_position = next_target
-	guard_stuck_elapsed = 0.0
-	guard_last_position = guard.global_position
-	var retarget_threshold: float = guard_commit_repath_distance if guard_capture_committed else guard_repath_distance
-	if switching_mode or guard_last_path_target.distance_to(next_target) > retarget_threshold:
-		guard_forced_bypass_side = 0
-		guard_forced_lane_side = 0
-		guard_path_points.clear()
-		guard_repath_accum = guard_repath_interval
-	_play_guard_running()
-	_face_guard_towards(guard_target_position)
+	var started := bool(guard.call("start_chase_if_allowed", force_guard))
+	_sync_guard_state_cache()
+	return started
 
 func _play_guard_running():
-	if guard_anim_player == null:
-		return
-	var anim_name := _resolve_guard_animation(guard_run_animation, ["Mutant Run/mixamo_com", "Mutant Run", "Run/mixamo_com", "Run"])
-	if anim_name != "":
-		var anim_res := guard_anim_player.get_animation(anim_name)
-		if anim_res != null and anim_res.loop_mode == Animation.LOOP_NONE:
-			anim_res.loop_mode = Animation.LOOP_LINEAR
-	if anim_name != "" and (guard_anim_player.current_animation != anim_name or not guard_anim_player.is_playing()):
-		guard_anim_player.play(anim_name)
+	if guard != null and guard.has_method("play_running_animation"):
+		guard.call("play_running_animation")
 
-func _face_guard_towards(target: Vector3):
-	if guard == null:
-		return
-	var look_target := Vector3(target.x, guard.global_position.y, target.z)
-	if guard.global_position.distance_to(look_target) < 0.001:
-		return
-	guard.look_at(look_target, Vector3.UP)
-	guard.rotate_y(deg_to_rad(guard_model_facing_offset_degrees))
+func _command_guard_to_last_seen(force_guard: bool = false):
+	_guard_runtime_sync()
+	if guard != null and guard.has_method("command_to_last_seen"):
+		guard.call("command_to_last_seen", force_guard)
+	_sync_guard_state_cache()
 
-func _command_guard_to_last_seen():
-	if guard_has_last_seen_player:
-		_command_guard_to_position(guard_last_seen_player_position)
-
-func _command_guard_to_position(world_target: Vector3):
-	if guard == null:
-		return
-	if guard_capture_committed:
-		_start_guard_player_chase_if_allowed(true)
-		return
-	if guard_chasing_player and _guard_chase_locked():
-		return
-	var resolved_target := Vector3(world_target.x, guard.global_position.y, world_target.z)
-	if guard_target_active and not guard_chasing_player and guard_target_position.distance_to(resolved_target) <= 0.2:
-		return
-	guard_chasing_player = false
-	guard_chase_lock_until = 0.0
-	guard_forced_bypass_side = 0
-	guard_forced_lane_side = 0
-	guard_target_position = resolved_target
-	guard_target_active = true
-	guard_path_points.clear()
-	guard_repath_accum = guard_repath_interval
-	guard_last_position = guard.global_position
-	guard_stuck_elapsed = 0.0
-	_face_guard_towards(guard_target_position)
-	_play_guard_running()
+func _command_guard_to_position(world_target: Vector3, force_guard: bool = false):
+	_guard_runtime_sync()
+	if guard != null and guard.has_method("command_to_position"):
+		guard.call("command_to_position", world_target, force_guard)
+	_sync_guard_state_cache()
 
 func _update_guard_movement(delta: float):
-	if guard == null or not guard_awake:
-		return
-	if guard_capture_committed and not guard_target_active:
-		_start_guard_player_chase_if_allowed(true)
-		return
-	if not guard_target_active:
-		return
-	if guard_capture_committed and not guard_chasing_player:
-		_start_guard_player_chase_if_allowed(true)
-		return
-	var current_pos := guard.global_position
-	if guard_chasing_player and player_body != null:
-		var player_now := Vector3(player_body.global_position.x, guard.global_position.y, player_body.global_position.z)
-		guard_target_position = player_now
-		if current_pos.distance_to(player_now) <= guard_catch_distance:
-			_trigger_guard_capture()
-			return
-
-	var moved_since_last := current_pos.distance_to(guard_last_position)
-	if moved_since_last <= guard_stuck_distance_threshold:
-		guard_stuck_elapsed += delta
-	else:
-		guard_stuck_elapsed = 0.0
-	guard_last_position = current_pos
-
-	var final_target := Vector3(guard_target_position.x, current_pos.y, guard_target_position.z)
-	guard_repath_accum += delta
-	var active_repath_interval := guard_repath_interval
-	if guard_chasing_player:
-		active_repath_interval = maxf(0.09, guard_repath_interval * 0.78)
-	if guard_capture_committed:
-		active_repath_interval = maxf(active_repath_interval, guard_commit_repath_interval)
-	var should_repath := guard_path_points.is_empty()
-	if guard_capture_committed:
-		should_repath = should_repath or guard_last_path_target.distance_to(final_target) > guard_commit_repath_distance
-	else:
-		should_repath = should_repath or guard_repath_accum >= active_repath_interval
-		should_repath = should_repath or guard_last_path_target.distance_to(final_target) > guard_repath_distance
-	if guard_stuck_elapsed >= guard_stuck_timeout_seconds:
-		guard_stuck_elapsed = 0.0
-		guard_forced_bypass_side = 0
-		guard_forced_lane_side = 0
-		guard_path_points.clear()
-		should_repath = true
-	if should_repath:
-		guard_repath_accum = 0.0
-		_rebuild_guard_path(current_pos, final_target)
-
-	var target := final_target
-	if not guard_path_points.is_empty():
-		target = guard_path_points[0]
-	var to_target := target - current_pos
-	var dist := to_target.length()
-	var reach_distance := guard_target_reach_distance
-	if guard_chasing_player and guard_path_points.size() <= 1:
-		reach_distance = guard_catch_distance
-	if dist <= reach_distance:
-		if not guard_path_points.is_empty():
-			guard_path_points.remove_at(0)
-			return
-		if guard_chasing_player and not game_locked:
-			_trigger_guard_capture()
-			return
-		guard_target_active = false
-		guard_forced_bypass_side = 0
-		guard_forced_lane_side = 0
-		guard_stuck_elapsed = 0.0
-		return
-	var dir := to_target / dist
-	var speed := guard_chase_speed if guard_chasing_player else guard_run_speed
-	var step := minf(dist, speed * delta)
-	_face_guard_towards(target)
-	var next_pos := current_pos + dir * step
-	next_pos = _clamp_guard_to_shop(next_pos)
-	var counter_rect := _guard_counter_rect()
-	var step_from_2d := Vector2(current_pos.x, current_pos.z)
-	var step_to_2d := Vector2(next_pos.x, next_pos.z)
-	var blocked_by_counter := _segment_hits_rect(step_from_2d, step_to_2d, counter_rect)
-	var blocked_by_world := _guard_segment_hits_blocker(current_pos, next_pos)
-	if blocked_by_counter or blocked_by_world:
-		# Hard-stop any tunneling through counter/props; rebuild path and take a smaller safe step.
-		guard_path_points.clear()
-		_rebuild_guard_path(current_pos, final_target)
-		if not guard_path_points.is_empty():
-			var safe_target := guard_path_points[0]
-			var safe_vec := safe_target - current_pos
-			safe_vec.y = 0.0
-			var safe_len := safe_vec.length()
-			if safe_len > 0.001:
-				var safe_step := minf(safe_len, speed * delta * 0.65)
-				next_pos = current_pos + (safe_vec / safe_len) * safe_step
-			else:
-				next_pos = current_pos
-		else:
-			next_pos = current_pos
-		next_pos = _clamp_guard_to_shop(next_pos)
-		if _guard_segment_hits_blocker(current_pos, next_pos):
-			next_pos = current_pos
-	if _point_in_counter(next_pos):
-		next_pos = _push_guard_out_of_counter(next_pos, dir)
-	guard.global_position = next_pos
-
-func _rebuild_guard_path(from_pos: Vector3, target_pos: Vector3):
-	guard_path_points.clear()
-	guard_last_path_target = target_pos
-	var from_2d := Vector2(from_pos.x, from_pos.z)
-	var target_2d := Vector2(target_pos.x, target_pos.z)
-	var counter_rect := _guard_counter_rect()
-	var back_z := clampf(counter_rect.position.y - guard_counter_avoid_margin_z, shop_bounds_min.y + guard_world_margin, shop_bounds_max.y - guard_world_margin)
-	var front_z := clampf(counter_rect.end.y + guard_counter_avoid_margin_z, shop_bounds_min.y + guard_world_margin, shop_bounds_max.y - guard_world_margin)
-	var start_back := from_2d.y <= counter_rect.position.y
-	var target_back := target_2d.y <= counter_rect.position.y
-
-	if guard_chasing_player:
-		# Merchant-style chase route: left corridor, lane align, across, then final.
-		var desired_left_corridor_x := minf(shop_bounds_min.x + guard_left_corridor_inset, counter_rect.position.x - guard_path_probe_margin)
-		var left_corridor_x := clampf(
-			desired_left_corridor_x,
-			shop_bounds_min.x + 0.01,
-			shop_bounds_max.x - guard_world_margin
-		)
-		var y := guard.global_position.y
-		var from_lane_z := back_z if start_back else front_z
-		var target_lane_z := back_z if target_back else front_z
-
-		# Step 1: align to a safe lane first (keeps motion away from center objects).
-		if absf(from_pos.z - from_lane_z) > 0.02:
-			guard_path_points.append(Vector3(from_pos.x, y, from_lane_z))
-
-		# Step 2: move left along the safe lane.
-		guard_path_points.append(Vector3(left_corridor_x, y, from_lane_z))
-
-		# Step 3: if player is on opposite side of counter, switch lane on the left corridor.
-		if absf(from_lane_z - target_lane_z) > 0.02:
-			guard_path_points.append(Vector3(left_corridor_x, y, target_lane_z))
-
-		# Step 4: move across to player's x while staying in safe lane.
-		guard_path_points.append(Vector3(target_pos.x, y, target_lane_z))
-	elif _segment_hits_rect(from_2d, target_2d, counter_rect):
-		var left_x := clampf(counter_rect.position.x - guard_counter_avoid_margin_x, shop_bounds_min.x + guard_world_margin, shop_bounds_max.x - guard_world_margin)
-		var right_x := clampf(counter_rect.end.x + guard_counter_avoid_margin_x, shop_bounds_min.x + guard_world_margin, shop_bounds_max.x - guard_world_margin)
-		var left_cost := absf(from_2d.x - left_x) + absf(target_2d.x - left_x)
-		var right_cost := absf(from_2d.x - right_x) + absf(target_2d.x - right_x)
-		var bypass_x := left_x if left_cost <= right_cost else right_x
-
-		if start_back != target_back:
-			var start_lane_non_chase := back_z if start_back else front_z
-			var target_lane_non_chase := back_z if target_back else front_z
-			guard_path_points.append(Vector3(bypass_x, guard.global_position.y, start_lane_non_chase))
-			guard_path_points.append(Vector3(bypass_x, guard.global_position.y, target_lane_non_chase))
-		else:
-			var same_lane := back_z if start_back else front_z
-			guard_path_points.append(Vector3(bypass_x, guard.global_position.y, same_lane))
-	elif not guard_chasing_player:
-		guard_forced_bypass_side = 0
-		guard_forced_lane_side = 0
-
-	var final_point := Vector3(target_pos.x, guard.global_position.y, target_pos.z)
-	if guard_path_points.is_empty() or guard_path_points[guard_path_points.size() - 1].distance_to(final_point) > 0.03:
-		guard_path_points.append(final_point)
-
-func _guard_counter_rect() -> Rect2:
-	var half_x := 1.8 + guard_counter_avoid_margin_x
-	var half_z := 0.5 + guard_counter_avoid_margin_z
-	var min_x := -3.5 - half_x
-	var min_z := -4.0 - half_z
-	return Rect2(Vector2(min_x, min_z), Vector2(half_x * 2.0, half_z * 2.0))
-
-func _segment_hits_rect(a: Vector2, b: Vector2, rect: Rect2) -> bool:
-	if rect.has_point(a) or rect.has_point(b):
-		return true
-	for i in range(1, 13):
-		var t := float(i) / 12.0
-		var p := a.lerp(b, t)
-		if rect.has_point(p):
-			return true
-	return false
-
-func _guard_segment_hits_blocker(from_pos: Vector3, to_pos: Vector3) -> bool:
-	if guard == null:
-		return false
-	var from_probe := from_pos + Vector3(0.0, guard_path_probe_height, 0.0)
-	var to_probe := to_pos + Vector3(0.0, guard_path_probe_height, 0.0)
-	var path_len := from_probe.distance_to(to_probe)
-	if path_len <= 0.001:
-		return false
-	var query: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(from_probe, to_probe)
-	query.collide_with_bodies = true
-	query.collide_with_areas = false
-	var excluded_rids: Array[RID] = []
-	if player_body != null:
-		excluded_rids.append(player_body.get_rid())
-	if guard is CollisionObject3D:
-		excluded_rids.append((guard as CollisionObject3D).get_rid())
-	query.exclude = excluded_rids
-	var hit: Dictionary = get_world_3d().direct_space_state.intersect_ray(query)
-	if hit.is_empty():
-		return false
-	var collider_val: Variant = hit.get("collider", null)
-	if collider_val is Node:
-		var collider_node := collider_val as Node
-		if collider_node == key_area:
-			return false
-		if guard != null and guard.is_ancestor_of(collider_node):
-			return false
-	var hit_pos_val: Variant = hit.get("position", to_probe)
-	var hit_pos: Vector3 = to_probe
-	if hit_pos_val is Vector3:
-		hit_pos = hit_pos_val
-	return from_probe.distance_to(hit_pos) < maxf(0.05, path_len - guard_path_probe_margin)
-
-func _clamp_guard_to_shop(pos: Vector3) -> Vector3:
-	var clamped := pos
-	clamped.x = clampf(clamped.x, shop_bounds_min.x + guard_world_margin, shop_bounds_max.x - guard_world_margin)
-	clamped.z = clampf(clamped.z, shop_bounds_min.y + guard_world_margin, shop_bounds_max.y - guard_world_margin)
-	return clamped
-
-func _point_in_counter(pos: Vector3) -> bool:
-	var rect := _guard_counter_rect()
-	return rect.has_point(Vector2(pos.x, pos.z))
-
-func _push_guard_out_of_counter(pos: Vector3, move_dir: Vector3) -> Vector3:
-	var corrected := pos
-	var rect := _guard_counter_rect()
-	var left := rect.position.x
-	var right := rect.end.x
-	var back := rect.position.y
-	var front := rect.end.y
-
-	var dx_left := absf(corrected.x - left)
-	var dx_right := absf(right - corrected.x)
-	var dz_back := absf(corrected.z - back)
-	var dz_front := absf(front - corrected.z)
-	var min_push := minf(minf(dx_left, dx_right), minf(dz_back, dz_front))
-
-	if min_push == dx_left:
-		corrected.x = left - 0.02
-	elif min_push == dx_right:
-		corrected.x = right + 0.02
-	elif min_push == dz_back:
-		corrected.z = back - 0.02
-	else:
-		corrected.z = front + 0.02
-
-	if move_dir.length() < 0.001:
-		corrected.z = front + 0.04
-	return _clamp_guard_to_shop(corrected)
+	_guard_runtime_sync()
+	if guard != null and guard.has_method("tick"):
+		guard.call("tick", delta)
+	_sync_guard_state_cache()
 
 func _trigger_guard_capture():
 	_set_focus_mode(false)
-	guard_capture_committed = false
+	_set_guard_capture_committed(false)
 	guard_chasing_player = false
 	guard_target_active = false
-	guard_chase_lock_until = 0.0
-	guard_forced_bypass_side = 0
-	guard_forced_lane_side = 0
 	game_locked = true
 	_end_interaction_mode()
 	if radial_menu.visible:
@@ -2426,42 +2112,6 @@ func _trigger_guard_capture():
 	_send_world_event("caught_by_guard", 1.0, {"reason": "Guard captured player."})
 	npc_text.text = "The guard catches you."
 	_show_endgame_overlay("You Got Caught", "The guard got you. Retry?", false)
-
-func _play_guard_sleeping():
-	if guard_anim_player == null:
-		return
-	var anim_name := _resolve_guard_animation(guard_sleep_animation, ["mixamo_com", "Sleeping Idle/mixamo_com", "Sleeping Idle"])
-	if anim_name != "":
-		guard_anim_player.play(anim_name)
-
-func _resolve_guard_animation(preferred: String, fallbacks: Array[String]) -> String:
-	if guard_anim_player == null:
-		return ""
-	if preferred != "" and guard_anim_player.has_animation(preferred):
-		return preferred
-	@warning_ignore("shadowed_variable_base_class")
-	for name in fallbacks:
-		if guard_anim_player.has_animation(name):
-			return name
-
-	var all_names := guard_anim_player.get_animation_list()
-	if preferred != "":
-		var preferred_lower := preferred.to_lower()
-		for candidate in all_names:
-			var text := str(candidate)
-			if text.to_lower().find(preferred_lower) != -1:
-				return text
-	for candidate in all_names:
-		var text := str(candidate)
-		if "standing up" in text.to_lower():
-			return text
-	if not all_names.is_empty():
-		return str(all_names[0])
-	return ""
-
-func _on_guard_animation_finished(_anim_name: StringName):
-	if guard_awake and guard_target_active:
-		_play_guard_running()
 
 func _vector_from_payload(payload: Dictionary, fallback: Vector3) -> Vector3:
 	if not (payload is Dictionary):
@@ -2484,7 +2134,7 @@ func _fail_run(reason: String):
 		return
 	_set_stealth_phase(StealthPhase.FAILED, reason)
 	_send_world_event("run_failed", 1.0, {"reason": reason})
-	guard_capture_committed = true
+	_set_guard_capture_committed(true)
 	_start_guard_player_chase_if_allowed(true)
 	_trigger_game_over()
 

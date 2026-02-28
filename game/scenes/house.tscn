@@ -1,4 +1,4 @@
-[gd_scene load_steps=28 format=3 uid="uid://b78hkh0phc13f"]
+[gd_scene load_steps=29 format=3 uid="uid://b78hkh0phc13f"]
 
 [ext_resource type="Script" path="res://scenes/house.gd" id="1_i77du"]
 [ext_resource type="PackedScene" uid="uid://d2fibm5eh6qn5" path="res://assets/Wall_Plaster_Straight_L.gltf" id="1_vr7oi"]
@@ -23,6 +23,7 @@
 [ext_resource type="PackedScene" uid="uid://deyhgyg0d0pme" path="res://assets/Roof_Wooden_2x1_Middle.gltf" id="20_dapt4"]
 [ext_resource type="PackedScene" uid="uid://c70ax81q0kevv" path="res://assets/key.fbx" id="22_5hly4"]
 [ext_resource type="PackedScene" uid="uid://bvvhmub2q2no8" path="res://scenes/guard.tscn" id="23_4llv7"]
+[ext_resource type="Script" path="res://scenes/guard.gd" id="24_aarqg"]
 [ext_resource type="PackedScene" uid="uid://i8w320trvhyp" path="res://assets/bottle_A_brown.fbx" id="24_tnp1u"]
 [ext_resource type="PackedScene" uid="uid://boqfprfhowrie" path="res://assets/coin.fbx" id="25_vivld"]
 [ext_resource type="PackedScene" uid="uid://743q0ka5nmow" path="res://assets/coin_stack_medium.fbx" id="26_dehgf"]
@@ -332,15 +333,20 @@ transform = Transform3D(-0.3, 0, 0, 0, -0.3, 0, 0, 0, -0.3, 1.1, 1.3, -1)
 
 [node name="Guard" parent="." instance=ExtResource("23_4llv7")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 0, -1)
+script = ExtResource("24_aarqg")
 
 [node name="bottle_A_brown" parent="." instance=ExtResource("24_tnp1u")]
 transform = Transform3D(0.3, 0, 0, 0, 0.3, 0, 0, 0, 0.3, 1, 2.1, -6.5)
+visible = false
 
 [node name="coin" parent="." instance=ExtResource("25_vivld")]
 transform = Transform3D(0.2, 0, 0, 0, 0.2, 0, 0, 0, 0.2, -5, 0, -5)
+visible = false
 
 [node name="coin_stack_medium" parent="." instance=ExtResource("26_dehgf")]
 transform = Transform3D(0.2, 0, 0, 0, 0.2, 0, 0, 0, 0.2, -5.5, 0, -5)
+visible = false
 
 [node name="chair" parent="." instance=ExtResource("27_l7ikf")]
 transform = Transform3D(-0.866025, 0, 0.5, 0, 1, 0, -0.5, 0, -0.866025, -5, 0, -7)
+visible = false

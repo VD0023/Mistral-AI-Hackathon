@@ -37,7 +37,7 @@ MERCHANT_VOICE_ID = os.getenv("MERCHANT_VOICE_ID", "").strip()
 ELEVENLABS_VOICE_ID_CALM = os.getenv("ELEVENLABS_VOICE_ID_CALM", MERCHANT_VOICE_ID).strip()
 ELEVENLABS_VOICE_ID_AGITATED = os.getenv("ELEVENLABS_VOICE_ID_AGITATED", MERCHANT_VOICE_ID).strip()
 ENABLE_ELEVENLABS_MUTTER = os.getenv("ENABLE_ELEVENLABS_MUTTER", "True").lower() == "true"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip(s).lower()
 USE_LLM_REPHRASE = os.getenv("USE_LLM_REPHRASE", os.getenv("USE_LOCAL_MOCK", "True")).lower() == "true"
 ENABLE_WANDB = os.getenv("ENABLE_WANDB", "False").lower() == "true"
 USE_LLM_SKILL_ROUTER = os.getenv("USE_LLM_SKILL_ROUTER", "True").lower() == "true"
@@ -340,7 +340,7 @@ def save_memory(mem: dict) -> None:
 
 def reset_memory_to_default() -> dict:
 	mem = default_memory()
-	# Always reset binary + JSON together so runtime and debug snapshots stay aligned.
+	# Always reset binary + JSON
 	_write_binary_memory(MEMORY_BINARY_FILE, mem)
 	_write_json_memory(MEMORY_FILE, mem)
 	return mem
