@@ -1,0 +1,105 @@
+{
+  "interactions": 0,
+  "trust": 45,
+  "suspicion": 72,
+  "temper": 36,
+  "notoriety": 0,
+  "has_stolen": false,
+  "thief_recognized": false,
+  "last_hood_on": false,
+  "caught": false,
+  "last_intent": "none",
+  "run_phase": "need_distraction",
+  "run_outcome": "active",
+  "run_reason": "",
+  "decision_dynamics": {
+    "smoothed_confidence": 0.2999,
+    "stable_intent": "monitor",
+    "last_switch_ts": 0.0
+  },
+  "episode_last_signature": "player|monitor|shop_floor|deescalated|False|False|True",
+  "episode_last_ts": 1772316713,
+  "skill_cooldowns": {
+    "question_player": 1772316713.334912,
+    "wake_guard": 1772316713.4051101
+  },
+  "blackboard": {
+    "threat_level": 57.3,
+    "last_seen_pos": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0
+    },
+    "suspect_confidence": 0.3,
+    "key_missing": false,
+    "player_visible": true,
+    "guard_task": "intercept_player",
+    "last_hf_classification": "Waiting for item...",
+    "ttl": {
+      "suspect_confidence": 1772316715.918098,
+      "key_missing": 1772316725.418099,
+      "player_visible": 1772316714.5180988,
+      "last_seen_pos": 1772316717.4180999,
+      "threat_level": 1772316715.918102,
+      "guard_task": 1772316715.405113
+    }
+  },
+  "episodes": [
+    {
+      "ts": 1772316713,
+      "who": "player",
+      "what": "question_player",
+      "where": "shop_floor",
+      "result": "uncertain",
+      "confidence": 0.201,
+      "hood_on": false,
+      "key_missing": false,
+      "player_visible": true,
+      "near_key": false,
+      "distance_bucket": "mid",
+      "intent": "monitor"
+    },
+    {
+      "ts": 1772316713,
+      "who": "player",
+      "what": "monitor",
+      "where": "shop_floor",
+      "result": "deescalated",
+      "confidence": 0.299,
+      "hood_on": false,
+      "key_missing": false,
+      "player_visible": true,
+      "near_key": false,
+      "distance_bucket": "mid",
+      "intent": "monitor"
+    },
+    {
+      "ts": 1772316713,
+      "who": "player",
+      "what": "wake_guard",
+      "where": "shop_floor",
+      "result": "escalated",
+      "confidence": 0.3,
+      "hood_on": false,
+      "key_missing": false,
+      "player_visible": true,
+      "near_key": false,
+      "distance_bucket": "mid",
+      "intent": "monitor"
+    },
+    {
+      "ts": 1772316713,
+      "who": "player",
+      "what": "monitor",
+      "where": "shop_floor",
+      "result": "deescalated",
+      "confidence": 0.3,
+      "hood_on": false,
+      "key_missing": false,
+      "player_visible": true,
+      "near_key": false,
+      "distance_bucket": "mid",
+      "intent": "monitor"
+    }
+  ]
+}

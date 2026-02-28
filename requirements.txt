@@ -1,0 +1,20 @@
+# Core AI SDKs
+mistralai
+elevenlabs
+huggingface_hub
+
+# Backend & API
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+
+# Memory & Monitoring
+chromadb
+wandb
+
+# Local Mocking
+pyttsx3
+
+# Hugging Face
+hugging-face
