@@ -52,7 +52,11 @@ func sanitize_target(
 	sanitized.z = back_z if absf(target.z - back_z) <= absf(target.z - front_z) else front_z
 
 	if point_in_gate_zone(sanitized):
-		sanitized.x = maxf(sanitized.x, guard_gate_zone_rect().end.x + 0.24)
+		var gate_rect := guard_gate_zone_rect()
+		if prefer_left:
+			sanitized.x = minf(sanitized.x, gate_rect.position.x - 0.24)
+		else:
+			sanitized.x = maxf(sanitized.x, gate_rect.end.x + 0.24)
 	return clamp_to_shop(sanitized, shop_bounds_min, shop_bounds_max, world_margin)
 
 func rebuild_path(
@@ -64,12 +68,14 @@ func rebuild_path(
 	world_margin: float,
 	counter_avoid_margin_x: float,
 	counter_avoid_margin_z: float,
-	left_corridor_inset: float
+	left_corridor_inset: float,
+	chase_route_side: int = -1
 ) -> Array[Vector3]:
 	var path_points: Array[Vector3] = []
+	var route_side := -1 if chase_route_side <= 0 else 1
 	var sanitized_target := sanitize_target(
 		target_pos,
-		true,
+		route_side < 0,
 		shop_bounds_min,
 		shop_bounds_max,
 		world_margin,
@@ -87,14 +93,24 @@ func rebuild_path(
 
 	if guard_chasing_player:
 		# Deterministic key-side route avoids oscillation around the counter edge.
-		var left_offset := maxf(0.18, left_corridor_inset + 0.16)
-		var corridor_x := clampf(counter_rect.position.x - left_offset, shop_bounds_min.x + world_margin, shop_bounds_max.x - world_margin)
+		var left_offset := maxf(0.18, left_corridor_inset + 0.12)
+		var corridor_x := counter_rect.position.x - left_offset if route_side < 0 else counter_rect.end.x + left_offset
+		var side_wall_buffer := world_margin + 0.18
+		corridor_x = clampf(corridor_x, shop_bounds_min.x + side_wall_buffer, shop_bounds_max.x - side_wall_buffer)
 		var approach_lane_z := back_z
-		var target_lane_z := back_z if target_back else front_z
+		var target_lane_z := sanitized_target.z
+		if target_lane_z > counter_rect.position.y and target_lane_z < counter_rect.end.y:
+			target_lane_z = back_z if target_back else front_z
 
+		var gate_rect := guard_gate_zone_rect()
+		var near_gate_band := route_side < 0 and from_pos.z >= gate_rect.position.y - 0.08 and from_pos.z <= gate_rect.end.y + 0.08
+		if near_gate_band and absf(from_pos.z - approach_lane_z) > 0.03:
+			# Exit gate blocker depth first to prevent horizontal clipping/repath loops.
+			path_points.append(Vector3(from_pos.x, y, approach_lane_z))
 		if absf(from_pos.x - corridor_x) > 0.03:
-			path_points.append(Vector3(corridor_x, y, from_pos.z))
-		if absf(from_pos.z - approach_lane_z) > 0.03:
+			var lane_z_for_left := approach_lane_z if near_gate_band else from_pos.z
+			path_points.append(Vector3(corridor_x, y, lane_z_for_left))
+		if absf((approach_lane_z if near_gate_band else from_pos.z) - approach_lane_z) > 0.03:
 			path_points.append(Vector3(corridor_x, y, approach_lane_z))
 		if absf(approach_lane_z - target_lane_z) > 0.03:
 			path_points.append(Vector3(corridor_x, y, target_lane_z))

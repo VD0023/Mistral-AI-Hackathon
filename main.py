@@ -37,7 +37,7 @@ MERCHANT_VOICE_ID = os.getenv("MERCHANT_VOICE_ID", "").strip()
 ELEVENLABS_VOICE_ID_CALM = os.getenv("ELEVENLABS_VOICE_ID_CALM", MERCHANT_VOICE_ID).strip()
 ELEVENLABS_VOICE_ID_AGITATED = os.getenv("ELEVENLABS_VOICE_ID_AGITATED", MERCHANT_VOICE_ID).strip()
 ENABLE_ELEVENLABS_MUTTER = os.getenv("ENABLE_ELEVENLABS_MUTTER", "True").lower() == "true"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip(s).lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()
 USE_LLM_REPHRASE = os.getenv("USE_LLM_REPHRASE", os.getenv("USE_LOCAL_MOCK", "True")).lower() == "true"
 ENABLE_WANDB = os.getenv("ENABLE_WANDB", "False").lower() == "true"
 USE_LLM_SKILL_ROUTER = os.getenv("USE_LLM_SKILL_ROUTER", "True").lower() == "true"
@@ -324,6 +324,9 @@ def load_memory() -> dict:
 
 	if isinstance(raw, dict):
 		mem.update(raw)
+		# Compatibility guard: older runs could persist recognition after hooded theft.
+		if bool(mem.get("has_stolen", False)) and bool(mem.get("last_hood_on", False)):
+			mem["thief_recognized"] = False
 	return mem
 
 
@@ -921,11 +924,14 @@ def _skill_precondition(skill: str, intent: str, perception: dict[str, Any], bel
 	near_key = bool(perception["near_key"])
 	interaction_active = bool(perception["interaction_active"])
 	player_speed = float(perception["player_speed"])
+	hood_on = bool(perception["hood_on"])
 
 	if skill == "wake_guard":
-		if confidence >= 0.45 or threat >= 50.0 or key_missing:
+		if key_missing and not hood_on:
+			return True, "Wake guard: key is missing and suspect is exposed."
+		if confidence >= (0.55 if hood_on else 0.45) or threat >= (60.0 if hood_on else 50.0):
 			return True, "Wake guard due to elevated threat."
-		return False, "Needs medium confidence/threat or missing key."
+		return False, "Needs stronger confidence/threat while hooded."
 	if skill == "patrol_counter":
 		if interaction_active:
 			return False, "Skip patrol while in direct interaction."
@@ -943,9 +949,12 @@ def _skill_precondition(skill: str, intent: str, perception: dict[str, Any], bel
 			return True, "Block the door to prevent escape."
 		return False, "Needs missing key or strong suspect confidence."
 	if skill == "chase_player":
-		if los and (confidence >= 0.75 or threat >= 70.0 or (key_missing and player_speed > 1.5)):
+		chase_confidence_threshold = 0.82 if hood_on else 0.75
+		chase_threat_threshold = 78.0 if hood_on else 70.0
+		escape_speed_trigger = key_missing and player_speed > (2.6 if hood_on else 1.5) and confidence >= (0.72 if hood_on else 0.55)
+		if los and (confidence >= chase_confidence_threshold or threat >= chase_threat_threshold or escape_speed_trigger):
 			return True, "Immediate pursuit conditions met."
-		return False, "Needs high confidence/threat and visual contact."
+		return False, "Needs stronger certainty/threat and visual contact."
 	return False, "Unknown skill."
 
 
@@ -1153,6 +1162,7 @@ def _stage_guard_consume(
 	player_visible = bool(_bb_get(bb, "player_visible"))
 	guard_task = str(_bb_get(bb, "guard_task") or "idle")
 	chosen_action = str(skill_stage.get("action", "monitor"))
+	hood_on = bool(perception.get("hood_on", False))
 
 	mode = "idle"
 	target: Any = "none"
@@ -1162,11 +1172,14 @@ def _stage_guard_consume(
 		mode = "chase_player"
 		target = "player"
 		reason = "Barnaby triggered immediate pursuit skill."
-	elif key_missing and player_visible:
+	elif key_missing and player_visible and not hood_on:
 		mode = "chase_player"
 		target = "player"
-		reason = "Stolen key confirmed and suspect visible: sprint pursuit."
-	elif player_visible and (suspect_confidence >= 0.62 or threat_level >= 68.0):
+		reason = "Stolen key visible on an exposed suspect: sprint pursuit."
+	elif player_visible and (
+		suspect_confidence >= (0.72 if hood_on else 0.62)
+		or threat_level >= (76.0 if hood_on else 68.0)
+	):
 		mode = "chase_player"
 		target = "player"
 		reason = "Visible suspect with high confidence/threat."
@@ -1386,7 +1399,10 @@ def apply_world_event_to_memory(event_type: str, intensity: float, mem: dict, me
 		mem["has_stolen"] = True
 		mem["notoriety"] = clamp(mem.get("notoriety", 0) + int(35 * level), 0, 100)
 		mem["last_hood_on"] = hood_on
-		if not hood_on:
+		if hood_on:
+			# Hooded theft should not silently inherit stale recognition from older runs.
+			mem["thief_recognized"] = False
+		else:
 			mem["thief_recognized"] = True
 		mem["suspicion"] = clamp(mem.get("suspicion", 0) + int(10 * level), 0, 100)
 		mem["temper"] = clamp(mem.get("temper", 0) + int(5 * level), 0, 100)
@@ -1395,28 +1411,39 @@ def apply_world_event_to_memory(event_type: str, intensity: float, mem: dict, me
 		mem["run_outcome"] = "active"
 		mem["run_reason"] = ""
 	elif etype == "start_visit":
-		mem["last_hood_on"] = hood_on
+		var_prior_hood_on = bool(mem.get("last_hood_on", False))
+		has_stolen_flag = bool(mem.get("has_stolen", False))
+		if not has_stolen_flag:
+			mem["last_hood_on"] = hood_on
 		mem["run_reason"] = ""
-		if not mem.get("has_stolen", False):
+		if has_stolen_flag and var_prior_hood_on:
+			# Revisits after hooded theft remain uncertain unless new direct evidence appears.
+			mem["thief_recognized"] = False
+		if not has_stolen_flag:
 			mem["run_phase"] = "need_distraction"
 			mem["run_outcome"] = "active"
 		elif str(mem.get("run_outcome", "active")) != "success":
 			mem["run_phase"] = "key_stolen"
 			mem["run_outcome"] = "active"
-		if mem.get("has_stolen", False):
-			# Returning after theft should trigger immediate hostility/pursuit posture.
+		if has_stolen_flag:
 			recognized = bool(mem.get("thief_recognized", False))
-			mem["suspicion"] = max(int(mem.get("suspicion", 0)), 90)
-			mem["temper"] = max(int(mem.get("temper", 0)), 88)
 			if recognized and not hood_on:
+				# Fully identified thief: immediate hostility.
 				mem["suspicion"] = max(int(mem.get("suspicion", 0)), 100)
 				mem["temper"] = max(int(mem.get("temper", 0)), 100)
 				mem["trust"] = clamp(mem.get("trust", 0) - 20, 0, 100)
 			elif recognized and hood_on:
-				mem["suspicion"] = max(int(mem.get("suspicion", 0)), clamp(mem.get("suspicion", 0) + int(8 * level), 0, 100))
-				mem["temper"] = max(int(mem.get("temper", 0)), clamp(mem.get("temper", 0) + int(5 * level), 0, 100))
+				# Recognized by behavior/history, but hood still softens certainty a bit.
+				mem["suspicion"] = max(int(mem.get("suspicion", 0)), 86)
+				mem["temper"] = max(int(mem.get("temper", 0)), 82)
+			elif hood_on:
+				# Hooded and unrecognized: A hood is suspicious. Set a higher base suspicion.
+				mem["suspicion"] = max(int(mem.get("suspicion", 0)), 84)
+				mem["temper"] = max(int(mem.get("temper", 0)), 78)
 			else:
-				mem["suspicion"] = clamp(mem.get("suspicion", 0) + int(4 * level), 0, 100)
+				# Unhooded but not unrecognized: Showing your face is less suspicious than hiding it.
+				mem["suspicion"] = max(int(mem.get("suspicion", 0)), 72)
+				mem["temper"] = max(int(mem.get("temper", 0)), 66)
 	elif etype == "player_unseen":
 		mem["suspicion"] = clamp(mem.get("suspicion", 0) - int(2 * level), 0, 100)
 		mem["temper"] = clamp(mem.get("temper", 0) - int(1 * level), 0, 100)
@@ -1455,12 +1482,24 @@ def apply_world_event_to_memory(event_type: str, intensity: float, mem: dict, me
 
 	state = build_state(mem, False)
 	action_hint = "idle"
-	if etype == "start_visit" and state["has_stolen"]:
+	start_visit_stolen = etype == "start_visit" and state["has_stolen"]
+	recognized = bool(state.get("thief_recognized", False))
+	hood_investigation_lock = False
+	if start_visit_stolen:
+		if recognized and not hood_on:
+			action_hint = "alert"
+		elif recognized and hood_on and (state["suspicion"] >= 94 or state["temper"] >= 92):
+			action_hint = "alert"
+		else:
+			action_hint = "investigate"
+			hood_investigation_lock = hood_on and not recognized
+	if not hood_investigation_lock:
+		if state["suspicion"] >= 85 or state["temper"] >= 85:
+			action_hint = "alert"
+		elif state["suspicion"] >= 55:
+			action_hint = "investigate"
+	elif state["suspicion"] >= 95 and state["temper"] >= 92:
 		action_hint = "alert"
-	if state["suspicion"] >= 85 or state["temper"] >= 85:
-		action_hint = "alert"
-	elif state["suspicion"] >= 55:
-		action_hint = "investigate"
 	state["action_hint"] = action_hint
 	return state
 

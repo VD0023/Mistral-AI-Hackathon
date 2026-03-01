@@ -1,0 +1,42 @@
+[
+  {
+    "scenario_id": "calm_browse__hoff_v1",
+    "description": "Innocent browsing baseline with no theft actions.",
+    "hood_on": false,
+    "ground_truth_thief": false,
+    "attempt_escape": false,
+    "detected": false,
+    "detection_time_s": null,
+    "detection_reason": "",
+    "false_accusation": false,
+    "successful_escape": false,
+    "guard_trigger_time_s": null,
+    "guard_first_response_time_s": 2.436,
+    "guard_response_latency_s": null,
+    "decide_samples": 4,
+    "final_run_outcome": "active",
+    "final_suspicion": 7.0,
+    "final_intent": "monitor",
+    "final_action": "monitor"
+  },
+  {
+    "scenario_id": "calm_browse__hoff_v2",
+    "description": "Innocent browsing baseline with no theft actions.",
+    "hood_on": false,
+    "ground_truth_thief": false,
+    "attempt_escape": false,
+    "detected": false,
+    "detection_time_s": null,
+    "detection_reason": "",
+    "false_accusation": false,
+    "successful_escape": false,
+    "guard_trigger_time_s": null,
+    "guard_first_response_time_s": 2.267,
+    "guard_response_latency_s": null,
+    "decide_samples": 4,
+    "final_run_outcome": "active",
+    "final_suspicion": 7.0,
+    "final_intent": "monitor",
+    "final_action": "monitor"
+  }
+]

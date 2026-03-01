@@ -88,7 +88,7 @@ func play_dialogue_line(mood: String, duration_seconds: float = 1.4):
 func start_chase():
 	stop_counter_patrol()
 	is_chasing = true
-	_play("Mutant Run/mixamo_com")
+	_play_run_animation()
 
 	var cam := get_viewport().get_camera_3d()
 	var run_target := global_position + (-global_basis.z) * 4.0
@@ -139,7 +139,7 @@ func stop_counter_patrol():
 	is_patrolling = false
 
 func _run_counter_patrol(window_seconds: float):
-	_play("Mutant Walking/mixamo_com")
+	_play_walk_animation()
 
 	var end_time: float = Time.get_ticks_msec() / 1000.0 + window_seconds
 	var point_a: Vector3 = Vector3(patrol_point_a.x, global_position.y, patrol_point_a.z)
@@ -155,7 +155,7 @@ func _run_counter_patrol(window_seconds: float):
 		go_to_a = not go_to_a
 
 	is_patrolling = false
-	_play("Talking/mixamo_com")
+	_play_idle_animation()
 	_schedule_next_glance()
 
 func _schedule_next_glance():
@@ -211,6 +211,72 @@ func _play(anim_name: String):
 		anim_player.play(anim_name)
 	elif anim_player and anim_player.has_animation("mixamo_com"):
 		anim_player.play("mixamo_com")
+
+func _play_walk_animation():
+	var anim_name := _resolve_animation(
+		[
+			"Mutant Walking/mixamo_com",
+			"Mutant Walking",
+			"Walking/mixamo_com",
+			"Walking",
+			"Walk/mixamo_com",
+			"Walk",
+		],
+		[
+			"walking",
+			"walk",
+		]
+	)
+	_play(anim_name)
+
+func _play_run_animation():
+	var anim_name := _resolve_animation(
+		[
+			"Mutant Run/mixamo_com",
+			"Mutant Run",
+			"Run/mixamo_com",
+			"Run",
+		],
+		[
+			"run",
+			"sprint",
+		]
+	)
+	_play(anim_name)
+
+func _play_idle_animation():
+	var anim_name := _resolve_animation(
+		[
+			"Talking/mixamo_com",
+			"Talking",
+			"mixamo_com",
+		],
+		[
+			"idle",
+			"talk",
+			"stand",
+		]
+	)
+	_play(anim_name)
+
+func _resolve_animation(preferred: Array[String], keyword_fallbacks: Array[String]) -> String:
+	if anim_player == null:
+		return "mixamo_com"
+	for candidate in preferred:
+		if anim_player.has_animation(candidate):
+			return candidate
+	var all_names := anim_player.get_animation_list()
+	for keyword in keyword_fallbacks:
+		var key_lower := keyword.to_lower()
+		for raw_name in all_names:
+			var name := str(raw_name)
+			if key_lower in name.to_lower():
+				return name
+	if anim_player.has_animation("mixamo_com"):
+		return "mixamo_com"
+	if not all_names.is_empty():
+		return str(all_names[0])
+	return ""
 
 func _collect_meshes(node: Node):
 	for child in node.get_children():

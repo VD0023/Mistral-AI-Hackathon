@@ -337,16 +337,12 @@ script = ExtResource("24_aarqg")
 
 [node name="bottle_A_brown" parent="." instance=ExtResource("24_tnp1u")]
 transform = Transform3D(0.3, 0, 0, 0, 0.3, 0, 0, 0, 0.3, 1, 2.1, -6.5)
-visible = false
 
 [node name="coin" parent="." instance=ExtResource("25_vivld")]
 transform = Transform3D(0.2, 0, 0, 0, 0.2, 0, 0, 0, 0.2, -5, 0, -5)
-visible = false
 
 [node name="coin_stack_medium" parent="." instance=ExtResource("26_dehgf")]
 transform = Transform3D(0.2, 0, 0, 0, 0.2, 0, 0, 0, 0.2, -5.5, 0, -5)
-visible = false
 
 [node name="chair" parent="." instance=ExtResource("27_l7ikf")]
 transform = Transform3D(-0.866025, 0, 0.5, 0, 1, 0, -0.5, 0, -0.866025, -5, 0, -7)
-visible = false

@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""
-Run scripted backend evaluations for Barnaby/guard behavior quality.
-
-Metrics:
-- detection_time_s
-- false_accusation
-- successful_escape
-- guard_response_latency_s
-"""
-
 from __future__ import annotations
 
 import argparse

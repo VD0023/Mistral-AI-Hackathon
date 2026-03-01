@@ -1,0 +1,17 @@
+{
+  "scenario_count": 2,
+  "detected_count": 0,
+  "detection_rate": 0.0,
+  "false_accusations": 0,
+  "false_accusation_rate": 0.0,
+  "escapes_attempted": 0,
+  "successful_escapes": 0,
+  "successful_escape_rate": 0.0,
+  "avg_detection_time_s": null,
+  "median_detection_time_s": null,
+  "avg_guard_response_latency_s": null,
+  "median_guard_response_latency_s": null,
+  "guard_triggered_count": 0,
+  "guard_responded_count": 2,
+  "guard_missed_response_count": 0
+}

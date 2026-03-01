@@ -1,0 +1,21 @@
+scenario_id,description,hood_on,ground_truth_thief,attempt_escape,detected,detection_time_s,detection_reason,false_accusation,successful_escape,guard_trigger_time_s,guard_first_response_time_s,guard_response_latency_s,decide_samples,final_run_outcome,final_suspicion,final_intent,final_action
+calm_browse__hoff_v1,Innocent browsing baseline with no theft actions.,False,False,False,False,,,False,False,,2.332,,4,active,7.0,monitor,monitor
+calm_browse__hoff_v2,Innocent browsing baseline with no theft actions.,False,False,False,False,,,False,False,,2.114,,5,active,9.0,monitor,monitor
+calm_browse__hon_v1,Innocent browsing baseline with no theft actions.,True,False,False,False,,,False,False,,2.597,,4,active,7.0,monitor,monitor
+calm_browse__hon_v2,Innocent browsing baseline with no theft actions.,True,False,False,False,,,False,False,,2.416,,5,active,6.0,monitor,monitor
+look_around_leave__hoff_v1,"Player requests to look around, but leaves without stealing.",False,False,False,False,,,False,False,,3.465,,6,active,8.0,monitor,monitor
+look_around_leave__hoff_v2,"Player requests to look around, but leaves without stealing.",False,False,False,False,,,False,False,,3.442,,7,active,10.0,monitor,monitor
+look_around_leave__hon_v1,"Player requests to look around, but leaves without stealing.",True,False,False,False,,,False,False,,3.299,,7,active,10.0,monitor,monitor
+look_around_leave__hon_v2,"Player requests to look around, but leaves without stealing.",True,False,False,False,,,False,False,,4.011,,8,active,4.0,monitor,monitor
+risky_hover_key__hoff_v1,Suspicious movement near key with no theft attempt.,False,False,False,True,1.392,decide_detection,True,False,0.012,0.373,0.361,7,active,40.0,monitor,monitor
+risky_hover_key__hoff_v2,Suspicious movement near key with no theft attempt.,False,False,False,True,1.882,decide_detection,True,False,0.029,0.375,0.345,7,active,41.0,monitor,monitor
+risky_hover_key__hon_v1,Suspicious movement near key with no theft attempt.,True,False,False,False,,,False,False,0.009,0.355,0.346,6,active,36.0,monitor,monitor
+risky_hover_key__hon_v2,Suspicious movement near key with no theft attempt.,True,False,False,False,,,False,False,0.051,0.525,0.474,7,active,41.0,monitor,monitor
+stealth_steal_escape__hoff_v1,"Structured stealth flow: look around, steal key, exit.",False,True,True,True,4.863,decide_detection,False,False,4.514,3.831,,8,failed,14.0,investigate,block_exit
+stealth_steal_escape__hoff_v2,"Structured stealth flow: look around, steal key, exit.",False,True,True,True,4.653,decide_detection,False,False,4.311,3.528,,8,failed,14.0,investigate,patrol_counter
+stealth_steal_escape__hon_v1,"Structured stealth flow: look around, steal key, exit.",True,True,True,True,4.534,decide_detection,False,False,4.193,3.411,,8,failed,14.0,monitor,patrol_counter
+stealth_steal_escape__hon_v2,"Structured stealth flow: look around, steal key, exit.",True,True,True,True,5.239,decide_detection,False,False,4.604,3.687,,8,failed,14.0,monitor,block_exit
+rush_steal_escape__hoff_v1,Aggressive theft path with high visibility and speed.,False,True,True,True,3.197,decide_detection,False,False,3.916,3.197,,7,failed,55.0,accuse,block_exit
+rush_steal_escape__hoff_v2,Aggressive theft path with high visibility and speed.,False,True,True,True,3.034,decide_detection,False,False,3.736,3.034,,9,failed,54.0,accuse,chase_player
+rush_steal_escape__hon_v1,Aggressive theft path with high visibility and speed.,True,True,True,True,4.332,decide_detection,False,False,3.852,3.085,,8,failed,52.0,monitor,patrol_counter
+rush_steal_escape__hon_v2,Aggressive theft path with high visibility and speed.,True,True,True,True,4.442,decide_detection,False,False,3.894,3.211,,8,failed,52.0,monitor,block_exit

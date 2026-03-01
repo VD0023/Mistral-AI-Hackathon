@@ -40,19 +40,20 @@ extends Node3D
 @export var key_merchant_safe_distance := 1.45
 @export var decide_tick_seconds := 0.55
 @export var hard_fail_suspicion_threshold := 85.0
+@export var barnaby_guard_call_cooldown_seconds := 1.4
 @export var show_decision_debug_panel := false
 @export var focus_time_scale := 0.72
 @export var focus_desaturation := 0.74
 @export var focus_vignette_strength := 0.26
 @export var focus_merchant_label_height := 2.45
 @export var focus_guard_label_height := 2.25
-@export var ambient_mutter_interval_seconds := 7.0
-@export var ambient_mutter_first_delay_seconds := 1.4
+@export var ambient_mutter_interval_seconds := 4.8
+@export var ambient_mutter_first_delay_seconds := 0.9
 @export var ambient_mutter_text_fallback := true
 @export var whisper_near_distance := 1.5
-@export var whisper_far_distance := 9.5
-@export var whisper_near_volume_db := -2.8
-@export var whisper_far_volume_db := -27.0
+@export var whisper_far_distance := 18.0
+@export var whisper_near_volume_db := 3.0
+@export var whisper_far_volume_db := -8.0
 @export var throw_distance := 4.8
 @export var throw_arc_height := 1.15
 @export var throw_segment_time := 0.24
@@ -130,6 +131,7 @@ var ai_last_suspect_conf := 0.0
 var ai_last_temper := 18.0
 var thrown_visual_root: Node3D
 var throwable_templates: Dictionary = {}
+var barnaby_guard_call_until := 0.0
 
 var yaw := 0.0
 var pitch := 0.0
@@ -208,8 +210,10 @@ func _physics_process(delta: float):
 	_update_ambient_mutter(delta)
 	_update_suspicion_widget()
 	_update_focus_labels()
-	if stealth_phase != StealthPhase.FAILED and stealth_phase != StealthPhase.ESCAPED and suspicion_value >= hard_fail_suspicion_threshold:
-		_fail_run("Suspicion reached %d%%. Barnaby calls the guard." % int(round(suspicion_value)))
+	if stealth_phase != StealthPhase.FAILED and stealth_phase != StealthPhase.ESCAPED and suspicion_value >= hard_fail_suspicion_threshold and not guard_capture_committed and not guard_chasing_player:
+		_barnaby_call_guard("Barnaby shouts: \"Guard! Stop that thief!\"")
+		_set_guard_capture_committed(true)
+		_start_guard_player_chase_if_allowed(true)
 
 func _exit_tree():
 	_set_focus_mode(false)
@@ -344,10 +348,8 @@ func _update_interact_target():
 		current_target = InteractTarget.KEY
 		if _can_steal_key():
 			_set_prompt("Press E to steal key")
-		elif stealth_phase == StealthPhase.DISTRACTION_WINDOW:
-			_set_prompt("Move now. Barnaby is watching the counter.")
 		else:
-			_set_prompt("Talk to Barnaby, choose Look Around, then steal.")
+			_set_prompt(_key_steal_block_reason())
 		return
 	if target_type == "exit":
 		current_target = InteractTarget.EXIT
@@ -376,10 +378,8 @@ func _try_key_soft_target() -> bool:
 	current_target = InteractTarget.KEY
 	if _can_steal_key():
 		_set_prompt("Press E to steal key")
-	elif stealth_phase == StealthPhase.DISTRACTION_WINDOW:
-		_set_prompt("Move now. Barnaby is watching the counter.")
 	else:
-		_set_prompt("Talk to Barnaby, choose Look Around, then steal.")
+		_set_prompt(_key_steal_block_reason())
 	return true
 
 func _set_prompt(text: String):
@@ -402,7 +402,7 @@ func _handle_interact():
 			if _can_steal_key():
 				_steal_key_sequence()
 			else:
-				npc_text.text = "No opening yet. Distract Barnaby first."
+				npc_text.text = _key_steal_block_reason()
 				_push_recent_action("failed_key_attempt")
 				_send_world_event("attempt_key_without_distract", 1.0, {"hood_on": player_hood_on})
 		InteractTarget.EXIT:
@@ -809,19 +809,19 @@ func _setup_barnaby_mutter_audio():
 		return
 	voice_audio_player = AudioStreamPlayer3D.new()
 	voice_audio_player.name = "BarnabyVoiceAudio"
-	voice_audio_player.max_distance = whisper_far_distance
-	voice_audio_player.unit_size = 1.0
+	voice_audio_player.max_distance = maxf(whisper_far_distance, 18.0)
+	voice_audio_player.unit_size = 2.2
 	voice_audio_player.attenuation_filter_cutoff_hz = 5500.0
-	voice_audio_player.volume_db = -3.0
+	voice_audio_player.volume_db = -1.0
 	merchant.add_child(voice_audio_player)
 	voice_audio_player.position = Vector3(0.0, 1.65, 0.0)
 
 	mutter_audio_player = AudioStreamPlayer3D.new()
 	mutter_audio_player.name = "BarnabyMutterAudio"
-	mutter_audio_player.max_distance = whisper_far_distance
-	mutter_audio_player.unit_size = 1.0
-	mutter_audio_player.attenuation_filter_cutoff_hz = 4200.0
-	mutter_audio_player.volume_db = whisper_far_volume_db
+	mutter_audio_player.max_distance = maxf(whisper_far_distance, 18.0)
+	mutter_audio_player.unit_size = 2.8
+	mutter_audio_player.attenuation_filter_cutoff_hz = 6800.0
+	mutter_audio_player.volume_db = maxf(whisper_far_volume_db, -7.0)
 	merchant.add_child(mutter_audio_player)
 	mutter_audio_player.position = Vector3(0.0, 1.65, 0.0)
 
@@ -876,7 +876,7 @@ func _is_mutter_eligible() -> bool:
 		return true
 	if ai_last_skill in ["investigate_last_seen", "search_counter", "patrol_counter", "question_player"]:
 		return true
-	return suspicion_value >= 48.0 and not key_stolen
+	return suspicion_value >= 28.0 and not key_stolen
 
 func _update_mutter_volume():
 	if mutter_audio_player == null or merchant == null or camera == null:
@@ -889,6 +889,7 @@ func _update_mutter_volume():
 func _on_mutter_reply(_res, code, _headers, body):
 	mutter_in_flight = false
 	if code != 200:
+		_play_mutter_placeholder_tone()
 		return
 	var payload = JSON.parse_string(body.get_string_from_utf8())
 	if not (payload is Dictionary):
@@ -901,6 +902,7 @@ func _on_mutter_reply(_res, code, _headers, body):
 	_emit_mutter_feedback(text)
 	var audio_b64 := str(payload.get("audio_base64", ""))
 	if audio_b64 == "" or mutter_audio_player == null:
+		_play_mutter_placeholder_tone()
 		return
 	var audio_bytes: PackedByteArray = Marshalls.base64_to_raw(audio_b64)
 	if audio_bytes.is_empty():
@@ -910,6 +912,30 @@ func _on_mutter_reply(_res, code, _headers, body):
 	mutter_audio_player.stream = stream
 	_update_mutter_volume()
 	mutter_audio_player.play()
+
+func _play_mutter_placeholder_tone():
+	if mutter_audio_player == null:
+		return
+	if mutter_audio_player.playing:
+		return
+	var generator := AudioStreamGenerator.new()
+	generator.mix_rate = 22050.0
+	generator.buffer_length = 0.24
+	mutter_audio_player.stream = generator
+	_update_mutter_volume()
+	mutter_audio_player.play()
+	var playback := mutter_audio_player.get_stream_playback()
+	if not (playback is AudioStreamGeneratorPlayback):
+		return
+	var writer := playback as AudioStreamGeneratorPlayback
+	var sample_count := int(generator.mix_rate * 0.18)
+	if sample_count <= 0:
+		return
+	for i in range(sample_count):
+		var t := float(i) / generator.mix_rate
+		var env := 1.0 - (float(i) / float(sample_count))
+		var tone := sin(TAU * 148.0 * t) * 0.09 * env
+		writer.push_frame(Vector2(tone, tone))
 
 func _emit_mutter_feedback(text: String):
 	if text.strip_edges() == "":
@@ -977,9 +1003,11 @@ func _on_world_event_reply(_res, _code, _headers, body):
 		last_world_emotion = emotion
 		merchant.start_behavior(emotion)
 	if action_hint == "alert":
+		_barnaby_call_guard("Barnaby shouts: \"Thief! Guard, take them now!\"")
 		_set_guard_capture_committed(true)
 		_start_guard_player_chase_if_allowed(true)
 	elif action_hint == "investigate":
+		_barnaby_call_guard("Barnaby calls: \"Guard, check near the counter!\"")
 		_command_guard_to_last_seen(true)
 
 func _on_decide_reply(_res, code, _headers, body):
@@ -1006,7 +1034,8 @@ func _on_decide_reply(_res, code, _headers, body):
 		_apply_brain_run_state(run_phase, run_outcome, run_reason)
 
 	var merchant_dialogue_busy: bool = merchant != null and merchant.has_method("is_dialogue_active") and bool(merchant.call("is_dialogue_active"))
-	if merchant and not merchant_dialogue_busy and emotion != "" and not is_interacting:
+	if merchant and not merchant_dialogue_busy and emotion != "" and not is_interacting and not stealing_key and emotion != last_world_emotion:
+		last_world_emotion = emotion
 		merchant.start_behavior(emotion)
 	var should_chase_player := intent == "accuse" or confidence >= 0.72
 
@@ -1037,6 +1066,19 @@ func _on_decide_reply(_res, code, _headers, body):
 		guard_mode in ["chase_player", "wake_guard", "block_exit", "investigate_last_seen", "question_player"]
 		or action in ["chase_player", "wake_guard", "block_exit", "investigate_last_seen", "question_player"]
 	)
+	var guard_command := guard_mode if guard_mode != "" else action
+	if barnaby_called and (not guard_awake or not guard_chasing_player):
+		var call_line := "Barnaby calls: \"Guard, stay sharp.\""
+		match guard_command:
+			"chase_player":
+				call_line = "Barnaby shouts: \"Thief! Guard, take them now!\""
+			"block_exit":
+				call_line = "Barnaby orders: \"Guard, block the door!\""
+			"investigate_last_seen", "question_player":
+				call_line = "Barnaby calls: \"Guard, check that suspect!\""
+			"wake_guard":
+				call_line = "Barnaby calls: \"Guard, wake up!\""
+		_barnaby_call_guard(call_line)
 	if guard_mode == "chase_player" or action == "chase_player":
 		_set_guard_capture_committed(true)
 
@@ -1076,7 +1118,7 @@ func _on_decide_reply(_res, code, _headers, body):
 					_set_guard_capture_committed(true)
 					_start_guard_player_chase_if_allowed(barnaby_called)
 				elif _wake_guard_if_allowed(barnaby_called):
-					_command_guard_to_position(exit_door.global_position, barnaby_called)
+					_command_guard_to_position(_guard_exit_intercept_position(), barnaby_called)
 			"question_player":
 				if should_chase_player:
 					_set_guard_capture_committed(true)
@@ -1103,7 +1145,7 @@ func _apply_guard_state(mode: String, target_payload, fallback_last_seen: Vector
 				_set_guard_capture_committed(true)
 				_start_guard_player_chase_if_allowed(barnaby_called)
 			elif _wake_guard_if_allowed(barnaby_called):
-				_command_guard_to_position(exit_door.global_position, barnaby_called)
+				_command_guard_to_position(_guard_exit_intercept_position(), barnaby_called)
 			return true
 		"investigate_last_seen":
 			var target := fallback_last_seen
@@ -1759,18 +1801,64 @@ func _update_stealth_window_state():
 	npc_text.text = "Barnaby turns back toward the counter. You need another distraction."
 	_send_world_event("distract_expired", 1.0, {})
 
+func _barnaby_watching_key() -> bool:
+	if merchant == null or key_node == null:
+		return false
+	var origin := merchant.global_position + Vector3(0.0, 1.55, 0.0)
+	var target := key_node.global_position + Vector3(0.0, 0.12, 0.0)
+	var to_key := target - origin
+	if to_key.length() > barnaby_vision_distance + 1.2:
+		return false
+	var dir_to_key := to_key.normalized()
+	var forward := -merchant.global_basis.z.normalized()
+	var min_dot := cos(deg_to_rad(maxf(34.0, barnaby_fov_degrees * 0.42)))
+	if forward.dot(dir_to_key) < min_dot:
+		return false
+
+	var query := PhysicsRayQueryParameters3D.create(origin, target)
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
+	if player_body != null:
+		query.exclude = [player_body.get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return true
+	var collider_val: Variant = hit.get("collider", null)
+	if collider_val == key_node or collider_val == key_area:
+		return true
+	return false
+
+func _key_steal_block_reason() -> String:
+	if key_stolen:
+		return "Key already taken."
+	if key_node == null:
+		return "No key in sight."
+	var now := Time.get_ticks_msec() / 1000.0
+	if stealth_phase == StealthPhase.DISTRACTION_WINDOW and now > key_window_until:
+		return "Opening closed. Distract Barnaby again."
+	if _barnaby_watching_key():
+		return "No opening yet. Barnaby is watching the counter."
+	if guard_capture_committed or guard_chasing_player:
+		return "Too risky now. The guard is already moving."
+	if stealth_phase != StealthPhase.DISTRACTION_WINDOW:
+		return "Barnaby is turned away. You can risk stealing now."
+	return "Move now. The opening is active."
+
 func _can_steal_key() -> bool:
 	if key_stolen or key_node == null:
 		return false
-	if stealth_phase != StealthPhase.DISTRACTION_WINDOW:
-		return false
 	var now := Time.get_ticks_msec() / 1000.0
-	if now > key_window_until:
+	var in_distraction_window := stealth_phase == StealthPhase.DISTRACTION_WINDOW and now <= key_window_until
+	if guard_capture_committed or guard_chasing_player:
 		return false
-	# Barnaby must be away from the key while distracted.
-	if merchant.global_position.distance_to(key_node.global_position) < key_merchant_safe_distance:
+	var barnaby_watching := _barnaby_watching_key()
+	if in_distraction_window:
+		if barnaby_watching and merchant.global_position.distance_to(key_node.global_position) < key_merchant_safe_distance:
+			return false
+		return true
+	if barnaby_watching:
 		return false
-	return true
+	return suspicion_value < hard_fail_suspicion_threshold
 
 func _steal_key_sequence():
 	stealing_key = true
@@ -1815,6 +1903,8 @@ func _set_key_stolen_world_state():
 	if key_area:
 		key_area.queue_free()
 		key_area = null
+	if guard != null and guard.has_method("set_key_area"):
+		guard.call("set_key_area", key_area)
 
 @warning_ignore("unused_parameter")
 func _handle_start_visit_state(has_stolen: bool, thief_recognized: bool, emotion: String, action_hint: String):
@@ -1822,16 +1912,18 @@ func _handle_start_visit_state(has_stolen: bool, thief_recognized: bool, emotion
 		_set_stealth_phase(StealthPhase.NEED_DISTRACTION)
 		return
 	_set_stealth_phase(StealthPhase.KEY_STOLEN)
-	# Returning after key theft should immediately trigger pursuit, not passive lurking.
-	suspicion_value = maxf(suspicion_value, 95.0)
-	if merchant:
-		merchant.start_behavior("hostile")
-	_set_guard_capture_committed(true)
-	_start_guard_player_chase_if_allowed(true)
-	if thief_recognized or action_hint == "alert" or not player_hood_on:
-		npc_text.text = "Barnaby shouts: \"Thief! Guard, take them now!\""
+	var should_alert := thief_recognized or action_hint == "alert" or (not player_hood_on and suspicion_value >= 80.0)
+	if should_alert:
+		_barnaby_call_guard("Barnaby shouts: \"Thief! Guard, take them now!\"")
+		_set_guard_capture_committed(true)
+		_start_guard_player_chase_if_allowed(true)
 	else:
-		npc_text.text = "Barnaby snaps toward you: \"That key is mine. Guard!\""
+		_set_guard_capture_committed(false)
+		if action_hint == "investigate":
+			_barnaby_call_guard("Barnaby calls: \"Guard, check around the counter.\"")
+			_command_guard_to_last_seen(true)
+		else:
+			npc_text.text = "Barnaby snaps toward you: \"That key is mine.\""
 
 func _build_fallback_menu(emotion: String) -> Array:
 	if emotion == "hostile":
@@ -1959,6 +2051,7 @@ func _on_reply(_res, code, _head, body):
 		else:
 			merchant.start_behavior(emotion)
 	if is_caught:
+		_barnaby_call_guard("Barnaby shouts: \"Guard! Take them now!\"")
 		_set_guard_capture_committed(true)
 		_start_guard_player_chase_if_allowed(true)
 
@@ -1980,17 +2073,19 @@ func _try_open_key_window(emotion: String, choice_id: String):
 		return
 	if choice_id != "look_around":
 		return
-	if emotion == "hostile":
-		return
 
 	var now := Time.get_ticks_msec() / 1000.0
 	var window_duration := key_window_seconds
-	if emotion == "annoyed":
+	if emotion == "hostile":
+		window_duration = maxf(2.4, key_window_seconds * 0.42)
+	elif emotion == "annoyed":
 		window_duration = maxf(3.5, key_window_seconds * 0.65)
 	key_window_until = now + window_duration
 	distraction_guard_grace_until = now + minf(distraction_guard_grace_seconds, maxf(1.6, window_duration * 0.6))
 	_set_stealth_phase(StealthPhase.DISTRACTION_WINDOW)
-	if emotion == "annoyed":
+	if emotion == "hostile":
+		npc_text.text = "%s\nBarnaby is agitated, but glances away for a heartbeat. Move now." % npc_text.text
+	elif emotion == "annoyed":
 		npc_text.text = "%s\nBarnaby is distracted, but still wary. Move quickly." % npc_text.text
 	else:
 		npc_text.text = "%s\nBarnaby nods and turns to the shelves. Your window is open." % npc_text.text
@@ -2055,6 +2150,17 @@ func _set_guard_capture_committed(committed: bool):
 	if guard != null and guard.has_method("set_capture_committed"):
 		guard.call("set_capture_committed", committed)
 
+func _barnaby_call_guard(line: String):
+	var now := Time.get_ticks_msec() / 1000.0
+	if now < barnaby_guard_call_until:
+		return
+	barnaby_guard_call_until = now + maxf(0.4, barnaby_guard_call_cooldown_seconds)
+	if merchant and merchant.has_method("start_behavior"):
+		merchant.call("start_behavior", "hostile")
+	if npc_text and not game_locked:
+		npc_text.text = line
+	_push_recent_action("barnaby_calls_guard")
+
 func _guard_chase_locked() -> bool:
 	if guard == null or not guard.has_method("chase_locked"):
 		return false
@@ -2073,6 +2179,10 @@ func _start_guard_player_chase_if_allowed(force_guard: bool = false) -> bool:
 	if guard == null or not guard.has_method("start_chase_if_allowed"):
 		return false
 	var started := bool(guard.call("start_chase_if_allowed", force_guard))
+	if not started:
+		_sync_guard_state_cache()
+		if not guard_chasing_player:
+			_set_guard_capture_committed(false)
 	_sync_guard_state_cache()
 	return started
 
@@ -2121,6 +2231,20 @@ func _vector_from_payload(payload: Dictionary, fallback: Vector3) -> Vector3:
 	var z = float(payload.get("z", fallback.z))
 	return Vector3(x, y, z)
 
+func _guard_exit_intercept_position() -> Vector3:
+	var fallback := Vector3(-2.55, 0.0, -7.25)
+	if exit_door == null:
+		return fallback
+	var target := exit_door.global_position + Vector3(0.0, 0.0, 0.72)
+	var edge_margin := 0.25
+	target.x = clampf(target.x, shop_bounds_min.x + edge_margin, shop_bounds_max.x - edge_margin)
+	target.z = clampf(target.z, shop_bounds_min.y + edge_margin, shop_bounds_max.y - edge_margin)
+	if guard != null:
+		target.y = guard.global_position.y
+	else:
+		target.y = exit_door.global_position.y
+	return target
+
 func _push_recent_action(action_name: String):
 	if action_name == "":
 		return
@@ -2134,6 +2258,8 @@ func _fail_run(reason: String):
 		return
 	_set_stealth_phase(StealthPhase.FAILED, reason)
 	_send_world_event("run_failed", 1.0, {"reason": reason})
+	if not guard_chasing_player:
+		_barnaby_call_guard("Barnaby shouts: \"Guard! Stop them!\"")
 	_set_guard_capture_committed(true)
 	_start_guard_player_chase_if_allowed(true)
 	_trigger_game_over()
@@ -2148,7 +2274,7 @@ func _trigger_game_over():
 	if stealth_phase != StealthPhase.FAILED:
 		_set_stealth_phase(StealthPhase.FAILED, "Run failed.")
 	if merchant:
-		merchant.start_chase()
+		merchant.start_behavior("hostile")
 	await get_tree().create_timer(1.8).timeout
 	var reason := fail_reason if fail_reason != "" else "Barnaby caught on to you."
 	_show_endgame_overlay("You Got Caught", "%s Retry?" % reason, false)

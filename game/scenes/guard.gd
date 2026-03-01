@@ -3,6 +3,7 @@ class_name GuardController
 
 const GuardNavigator = preload("res://scenes/guard_nav.gd")
 
+@warning_ignore("unused_signal")
 signal captured_player
 
 @export var shop_bounds_min := Vector2(-5.8, -7.8)
@@ -22,14 +23,19 @@ signal captured_player
 @export var guard_chase_lock_seconds := 1.8
 @export var guard_stuck_timeout_seconds := 0.65
 @export var guard_stuck_distance_threshold := 0.04
-@export var guard_counter_avoid_margin_x := 0.22
-@export var guard_counter_avoid_margin_z := 0.48
-@export var guard_world_margin := 0.14
-@export var guard_left_corridor_inset := 0.06
+@export var guard_counter_avoid_margin_x := 0.12
+@export var guard_counter_avoid_margin_z := 0.38
+@export var guard_world_margin := 0.08
+@export var guard_left_corridor_inset := 0.02
 @export var guard_path_probe_height := 1.05
 @export var guard_path_probe_margin := 0.16
 @export var guard_commit_repath_interval := 0.42
 @export var guard_commit_repath_distance := 1.1
+@export var guard_chase_use_player_left_route := true
+@export_enum("Left:-1", "Right:1") var guard_default_chase_side := -1
+@export var guard_contact_capture_distance := 1.05
+@export var guard_contact_capture_hold_seconds := 0.24
+@export var guard_allow_counter_cutthrough_when_chasing := true
 
 var guard_anim_player: AnimationPlayer
 var guard_awake := false
@@ -46,6 +52,8 @@ var guard_forced_bypass_side := 0
 var guard_forced_lane_side := 0
 var guard_last_position := Vector3.ZERO
 var guard_stuck_elapsed := 0.0
+var guard_stuck_recoveries := 0
+var guard_contact_elapsed := 0.0
 var guard_capture_committed := false
 
 var current_suspicion := 0.0
@@ -80,6 +88,8 @@ func setup_state():
 	guard_forced_lane_side = 0
 	guard_last_position = global_position
 	guard_stuck_elapsed = 0.0
+	guard_stuck_recoveries = 0
+	guard_contact_elapsed = 0.0
 
 func set_player_body(body: CharacterBody3D):
 	player_body = body
@@ -176,12 +186,16 @@ func command_to_position(world_target: Vector3, barnaby_called: bool = false) ->
 	guard_repath_accum = guard_repath_interval
 	guard_last_position = global_position
 	guard_stuck_elapsed = 0.0
+	guard_stuck_recoveries = 0
+	guard_contact_elapsed = 0.0
 	_face_guard_towards(guard_target_position)
 	_play_guard_running()
 	return true
 
 func tick(delta: float):
 	if not guard_awake:
+		return
+	if _wake_animation_active():
 		return
 	if guard_capture_committed and not guard_target_active:
 		start_chase_if_allowed(true)
@@ -195,21 +209,32 @@ func tick(delta: float):
 	var current_pos := global_position
 	if guard_chasing_player and player_body != null:
 		var player_now := Vector3(player_body.global_position.x, global_position.y, player_body.global_position.z)
-		player_now = _sanitize_guard_target(player_now, true)
+		player_now = _clamp_guard_to_shop(player_now) if _uses_direct_chase_path() else _sanitize_guard_target(player_now, true)
 		guard_target_position = player_now
+		if current_pos.distance_to(player_now) <= guard_contact_capture_distance:
+			guard_contact_elapsed += delta
+			if guard_contact_elapsed >= guard_contact_capture_hold_seconds:
+				_emit_capture()
+				return
+		else:
+			guard_contact_elapsed = 0.0
 		if _can_guard_capture_player(current_pos, player_now):
 			_emit_capture()
 			return
+	else:
+		guard_contact_elapsed = 0.0
 
 	var moved_since_last := current_pos.distance_to(guard_last_position)
 	if moved_since_last <= guard_stuck_distance_threshold:
 		guard_stuck_elapsed += delta
 	else:
 		guard_stuck_elapsed = 0.0
+		if moved_since_last > maxf(0.12, guard_stuck_distance_threshold * 4.0):
+			guard_stuck_recoveries = 0
 	guard_last_position = current_pos
 
 	var final_target := Vector3(guard_target_position.x, current_pos.y, guard_target_position.z)
-	final_target = _sanitize_guard_target(final_target, true)
+	final_target = _clamp_guard_to_shop(final_target) if _uses_direct_chase_path() else _sanitize_guard_target(final_target, true)
 	guard_target_position = final_target
 	guard_repath_accum += delta
 	var active_repath_interval := guard_repath_interval
@@ -226,8 +251,21 @@ func tick(delta: float):
 		should_repath = should_repath or guard_last_path_target.distance_to(final_target) > guard_repath_distance
 	if guard_stuck_elapsed >= guard_stuck_timeout_seconds:
 		guard_stuck_elapsed = 0.0
+		guard_stuck_recoveries += 1
 		guard_forced_bypass_side = 0
-		guard_forced_lane_side = 0
+		if guard_chasing_player:
+			if guard_forced_lane_side == 0:
+				guard_forced_lane_side = _resolve_chase_route_side()
+			elif guard_stuck_recoveries >= 2:
+				# Keep a stable left-biased lane; avoid ping-ponging side selection.
+				guard_forced_lane_side = -1 if guard_forced_lane_side <= 0 else guard_forced_lane_side
+				guard_stuck_recoveries = 0
+			var nudged := _nudge_from_corner(current_pos)
+			if nudged.distance_to(current_pos) > 0.001:
+				global_position = nudged
+				current_pos = nudged
+		else:
+			guard_forced_lane_side = 0
 		guard_path_points.clear()
 		should_repath = true
 	if should_repath:
@@ -260,6 +298,7 @@ func tick(delta: float):
 		guard_forced_bypass_side = 0
 		guard_forced_lane_side = 0
 		guard_stuck_elapsed = 0.0
+		guard_contact_elapsed = 0.0
 		return
 
 	var dir := to_target / dist
@@ -271,8 +310,8 @@ func tick(delta: float):
 	var counter_rect := _guard_counter_rect()
 	var step_from_2d := Vector2(current_pos.x, current_pos.z)
 	var step_to_2d := Vector2(next_pos.x, next_pos.z)
-	var blocked_by_counter := _segment_hits_rect(step_from_2d, step_to_2d, counter_rect)
-	var blocked_by_world := _guard_segment_hits_blocker(current_pos, next_pos)
+	var blocked_by_counter := _counter_blocks_guard() and _segment_hits_rect(step_from_2d, step_to_2d, counter_rect)
+	var blocked_by_world := false if _uses_direct_chase_path() else _guard_segment_hits_blocker(current_pos, next_pos)
 	if blocked_by_counter or blocked_by_world:
 		guard_path_points.clear()
 		_rebuild_guard_path(current_pos, final_target)
@@ -292,16 +331,18 @@ func tick(delta: float):
 		else:
 			next_pos = current_pos
 		next_pos = _clamp_guard_to_shop(next_pos)
-		if _guard_segment_hits_blocker(current_pos, next_pos):
+		if not _uses_direct_chase_path() and _guard_segment_hits_blocker(current_pos, next_pos):
 			next_pos = current_pos
-	if _point_in_counter(next_pos):
+	if _counter_blocks_guard() and _point_in_counter(next_pos):
 		next_pos = _push_guard_out_of_counter(next_pos, dir)
-	if _point_in_guard_gate_zone(next_pos):
+	if not _uses_direct_chase_path() and _point_in_guard_gate_zone(next_pos):
 		next_pos = _push_guard_out_of_gate_zone(next_pos, dir)
 	global_position = next_pos
 
 func _can_wake_guard(barnaby_called: bool = false) -> bool:
 	if guard_awake:
+		return true
+	if barnaby_called and key_stolen:
 		return true
 	if current_suspicion <= guard_wake_call_suspicion_threshold:
 		return false
@@ -312,13 +353,14 @@ func _can_chase_guard(barnaby_called: bool = false) -> bool:
 		return true
 	if guard_capture_committed and guard_awake:
 		return true
-	if not guard_awake and not barnaby_called:
+	# Guard should only enter chase from an explicit Barnaby command.
+	if not barnaby_called:
 		return false
-	if _guard_grace_active() and not barnaby_called:
+	if _guard_grace_active() and not key_stolen:
 		return false
-	if current_suspicion >= guard_chase_suspicion_threshold:
-		return guard_awake or barnaby_called
-	return barnaby_called and current_suspicion > guard_wake_call_suspicion_threshold
+	if key_stolen:
+		return true
+	return current_suspicion >= guard_chase_suspicion_threshold
 
 func _guard_grace_active() -> bool:
 	if key_stolen:
@@ -349,15 +391,22 @@ func _start_guard_player_chase():
 	guard_target_active = true
 	guard_target_position = next_target
 	guard_stuck_elapsed = 0.0
+	guard_stuck_recoveries = 0
 	guard_last_position = global_position
 	var retarget_threshold: float = guard_commit_repath_distance if guard_capture_committed else guard_repath_distance
+	if guard_forced_lane_side == 0:
+		guard_forced_lane_side = _resolve_chase_route_side()
 	if switching_mode or guard_last_path_target.distance_to(next_target) > retarget_threshold:
 		guard_forced_bypass_side = 0
-		guard_forced_lane_side = 0
 		guard_path_points.clear()
 		guard_repath_accum = guard_repath_interval
-	_play_guard_running()
-	_face_guard_towards(guard_target_position)
+	_rebuild_guard_path(global_position, next_target)
+	if not _wake_animation_active():
+		_play_guard_running()
+	if not guard_path_points.is_empty():
+		_face_guard_towards(guard_path_points[0])
+	else:
+		_face_guard_towards(guard_target_position)
 
 func _play_guard_running():
 	if guard_anim_player == null:
@@ -379,7 +428,16 @@ func _face_guard_towards(target: Vector3):
 
 func _rebuild_guard_path(from_pos: Vector3, target_pos: Vector3):
 	guard_path_points.clear()
-	var sanitized_target := _sanitize_guard_target(target_pos, true)
+	if _uses_direct_chase_path():
+		guard_last_path_target = _clamp_guard_to_shop(target_pos)
+		guard_path_points.append(guard_last_path_target)
+		return
+	var chase_side := -1
+	if guard_chasing_player:
+		if guard_forced_lane_side == 0:
+			guard_forced_lane_side = _resolve_chase_route_side()
+		chase_side = -1 if guard_forced_lane_side <= 0 else 1
+	var sanitized_target := _sanitize_guard_target(target_pos, chase_side < 0)
 	guard_last_path_target = sanitized_target
 	guard_path_points = guard_nav.rebuild_path(
 		from_pos,
@@ -390,11 +448,24 @@ func _rebuild_guard_path(from_pos: Vector3, target_pos: Vector3):
 		guard_world_margin,
 		guard_counter_avoid_margin_x,
 		guard_counter_avoid_margin_z,
-		guard_left_corridor_inset
+		guard_left_corridor_inset,
+		chase_side
 	)
 	if not guard_chasing_player:
 		guard_forced_bypass_side = 0
 		guard_forced_lane_side = 0
+
+func _resolve_chase_route_side() -> int:
+	if not guard_chase_use_player_left_route or player_body == null:
+		return -1 if guard_default_chase_side <= 0 else 1
+	var player_left := -player_body.global_basis.x
+	player_left.y = 0.0
+	if player_left.length() <= 0.001:
+		return -1 if guard_default_chase_side <= 0 else 1
+	player_left = player_left.normalized()
+	if absf(player_left.x) < 0.08:
+		return -1 if guard_default_chase_side <= 0 else 1
+	return -1 if player_left.x < 0.0 else 1
 
 func _guard_counter_rect() -> Rect2:
 	return guard_nav.guard_counter_rect(guard_counter_avoid_margin_x, guard_counter_avoid_margin_z)
@@ -405,16 +476,19 @@ func _segment_hits_rect(a: Vector2, b: Vector2, rect: Rect2) -> bool:
 func _can_guard_capture_player(guard_pos: Vector3, player_pos: Vector3) -> bool:
 	if guard_pos.distance_to(player_pos) > guard_catch_distance:
 		return false
-	var counter_rect := _guard_counter_rect()
-	var from_2d := Vector2(guard_pos.x, guard_pos.z)
-	var to_2d := Vector2(player_pos.x, player_pos.z)
-	if _segment_hits_rect(from_2d, to_2d, counter_rect):
-		return false
+	if _counter_blocks_guard():
+		var counter_rect := _guard_counter_rect()
+		var from_2d := Vector2(guard_pos.x, guard_pos.z)
+		var to_2d := Vector2(player_pos.x, player_pos.z)
+		if _segment_hits_rect(from_2d, to_2d, counter_rect):
+			return false
 	if _guard_segment_hits_blocker(guard_pos, player_pos):
 		return false
 	return true
 
 func _guard_segment_hits_blocker(from_pos: Vector3, to_pos: Vector3) -> bool:
+	if _uses_direct_chase_path():
+		return false
 	var path_vec := to_pos - from_pos
 	path_vec.y = 0.0
 	if path_vec.length() <= 0.001:
@@ -439,8 +513,6 @@ func _guard_segment_hits_blocker(from_pos: Vector3, to_pos: Vector3) -> bool:
 	var excluded_rids: Array[RID] = []
 	if player_body != null:
 		excluded_rids.append(player_body.get_rid())
-	if self is CollisionObject3D:
-		excluded_rids.append((self as CollisionObject3D).get_rid())
 
 	for offset in offsets:
 		for probe_height in heights:
@@ -460,6 +532,8 @@ func _guard_segment_hits_blocker(from_pos: Vector3, to_pos: Vector3) -> bool:
 			if collider_val is Node:
 				var collider_node := collider_val as Node
 				if collider_node == key_area:
+					continue
+				if not _counter_blocks_guard() and str(collider_node.name) == "CounterCollider":
 					continue
 				if is_ancestor_of(collider_node):
 					continue
@@ -482,6 +556,12 @@ func _guard_gate_zone_rect() -> Rect2:
 
 func _point_in_guard_gate_zone(pos: Vector3) -> bool:
 	return guard_nav.point_in_gate_zone(pos)
+
+func _counter_blocks_guard() -> bool:
+	return not _uses_direct_chase_path()
+
+func _uses_direct_chase_path() -> bool:
+	return guard_allow_counter_cutthrough_when_chasing and guard_chasing_player
 
 func _sanitize_guard_target(target: Vector3, prefer_left: bool = true) -> Vector3:
 	return guard_nav.sanitize_target(
@@ -524,10 +604,42 @@ func _push_guard_out_of_counter(pos: Vector3, move_dir: Vector3) -> Vector3:
 func _push_guard_out_of_gate_zone(pos: Vector3, move_dir: Vector3) -> Vector3:
 	var rect := _guard_gate_zone_rect()
 	var corrected := pos
-	corrected.x = maxf(corrected.x, rect.end.x + 0.18)
+	var left_exit_x := rect.position.x - 0.18
+	var right_exit_x := rect.end.x + 0.18
+	if move_dir.x < -0.02:
+		corrected.x = left_exit_x
+	elif move_dir.x > 0.02:
+		corrected.x = right_exit_x
+	elif guard_chasing_player:
+		corrected.x = left_exit_x
+	else:
+		var left_dist := absf(corrected.x - left_exit_x)
+		var right_dist := absf(right_exit_x - corrected.x)
+		corrected.x = left_exit_x if left_dist <= right_dist else right_exit_x
 	if absf(move_dir.z) > 0.05:
 		corrected.z += sign(move_dir.z) * 0.08
 	return _clamp_guard_to_shop(corrected)
+
+func _nudge_from_corner(pos: Vector3) -> Vector3:
+	var corner_margin := guard_world_margin + 0.16
+	var near_left := pos.x <= shop_bounds_min.x + corner_margin
+	var near_right := pos.x >= shop_bounds_max.x - corner_margin
+	var near_back := pos.z <= shop_bounds_min.y + corner_margin
+	var near_front := pos.z >= shop_bounds_max.y - corner_margin
+	if not ((near_left or near_right) and (near_back or near_front)):
+		return pos
+	var step := 0.34
+	var x := pos.x
+	var z := pos.z
+	if near_left:
+		x += step
+	elif near_right:
+		x -= step
+	if near_back:
+		z += step
+	elif near_front:
+		z -= step
+	return _clamp_guard_to_shop(Vector3(x, pos.y, z))
 
 func _emit_capture():
 	if game_locked:
@@ -538,6 +650,8 @@ func _emit_capture():
 	guard_chase_lock_until = 0.0
 	guard_forced_bypass_side = 0
 	guard_forced_lane_side = 0
+	guard_stuck_recoveries = 0
+	guard_contact_elapsed = 0.0
 	emit_signal("captured_player")
 
 func _play_guard_sleeping():
@@ -575,3 +689,12 @@ func _resolve_guard_animation(preferred: String, fallbacks: Array[String]) -> St
 func _on_guard_animation_finished(_anim_name: StringName):
 	if guard_awake and guard_target_active:
 		_play_guard_running()
+
+func _wake_animation_active() -> bool:
+	if guard_anim_player == null or not guard_anim_player.is_playing():
+		return false
+	var wake_name := str(_resolve_guard_animation(guard_wake_animation, ["Standing Up/mixamo_com", "Standing Up"]))
+	var current := str(guard_anim_player.current_animation)
+	if wake_name != "" and current == wake_name:
+		return true
+	return "standing up" in current.to_lower()
